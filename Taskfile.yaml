@@ -1,0 +1,13 @@
+---
+version: 3
+includes:
+  git:
+    taskfile: https://raw.githubusercontent.com/stuttgart-things/tasks/refs/heads/main/git/git.yaml
+
+dotenv: ['.env', '{{.HOME}}/.env']
+
+tasks:
+  default:
+    desc: List available tasks
+    cmds:
+      - task --list

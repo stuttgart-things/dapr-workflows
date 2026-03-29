@@ -1,0 +1,27 @@
+---
+name: Run Repository Linting
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  Lint-Repository:
+    uses: stuttgart-things/github-workflow-templates/.github/workflows/call-repository-linting.yaml@main
+    with:
+      runs-on: ubuntu-latest
+      environment-name: linting
+      app-directory: "./"
+      output-file: "/tmp/dapr-workflows.txt"
+      continue-error: "true"
+      dagger-version: v0.20.0
+      dagger-module-version: v1.59.0
+      branch-name: ${{ github.head_ref || github.ref_name }}
+    secrets: inherit # pragma: allowlist secret

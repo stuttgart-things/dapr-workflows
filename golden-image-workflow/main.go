@@ -98,12 +98,19 @@ func runTestWorkflow(ctx context.Context, wfClient *workflow.Client) error {
 		OSProfile:   "ubuntu24",
 		GitHub: types.GitHubConfig{
 			Owner: "stuttgart-things",
-			Repo:  "golden-image-pipelines",
+			Repo:  "stuttgart-things",
 			Ref:   "main",
 			Token: os.Getenv("GITHUB_TOKEN"),
 		},
 		Render: types.RenderInput{
-			Overrides: "vm_name=test-golden",
+			WorkflowFile:  "dispatch-render-packer-config.yaml",
+			OSFamily:      "ubuntu",
+			Provisioning:  "base-os",
+			Overrides:     "vm_name=test-golden",
+			CreatePR:      "false",
+			RenderOnly:    "true",
+			DaggerVersion: "0.20.0",
+			Runner:        "dagger-labul",
 		},
 		Git: types.GitInput{
 			BranchName:       "golden/labul-ubuntu24",
@@ -137,6 +144,10 @@ func runTestWorkflow(ctx context.Context, wfClient *workflow.Client) error {
 	}
 
 	log.Printf("workflow completed: status=%s", meta.String())
+
+	if meta.FailureDetails != nil {
+		log.Printf("failure: %s: %s", meta.FailureDetails.ErrorType, meta.FailureDetails.ErrorMessage)
+	}
 
 	if meta.Output != nil {
 		var output types.GoldenImageBuildOutput

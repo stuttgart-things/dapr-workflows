@@ -24,15 +24,14 @@ type GitHubConfig struct {
 }
 
 type RenderInput struct {
-	PackerTemplatesRepo string `json:"packerTemplatesRepo"`
-	PackerTemplatesPath string `json:"packerTemplatesPath"`
-	PackerTemplates     string `json:"packerTemplates"`
-	TestVMTemplatesPath string `json:"testVmTemplatesPath"`
-	TestVMTemplates     string `json:"testVmTemplates"`
-	BuildPath           string `json:"buildPath"`
-	EnvPath             string `json:"envPath"`
-	VariablesFiles      string `json:"variablesFiles"`
-	Overrides           string `json:"overrides"`
+	WorkflowFile  string `json:"workflowFile"`  // e.g. "dispatch-render-packer-config.yaml"
+	OSFamily      string `json:"osFamily"`       // e.g. "ubuntu", "rocky"
+	Provisioning  string `json:"provisioning"`   // e.g. "base-os", "rke2-node"
+	Overrides     string `json:"overrides"`
+	CreatePR      string `json:"createPr"`       // "true" / "false"
+	RenderOnly    string `json:"renderOnly"`     // "true" / "false"
+	DaggerVersion string `json:"daggerVersion"`
+	Runner        string `json:"runner"`
 }
 
 type GitInput struct {

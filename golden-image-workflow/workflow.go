@@ -26,14 +26,20 @@ func GoldenImageBuildWorkflow(ctx *workflow.WorkflowContext) (any, error) {
 
 	// Step 1: Render config
 	renderInput := activities.RenderConfigInput{
-		Owner:        gh.Owner,
-		Repo:         gh.Repo,
-		Ref:          gh.Ref,
-		Token:        gh.Token,
-		WorkflowFile: "render-config.yaml",
-		Environment:  input.Environment,
-		OSProfile:    input.OSProfile,
-		Overrides:    input.Render.Overrides,
+		Owner:         gh.Owner,
+		Repo:          gh.Repo,
+		Ref:           gh.Ref,
+		Token:         gh.Token,
+		WorkflowFile:  input.Render.WorkflowFile,
+		OSVersion:     input.OSProfile,
+		Lab:           input.Environment,
+		OSFamily:      input.Render.OSFamily,
+		Provisioning:  input.Render.Provisioning,
+		Overrides:     input.Render.Overrides,
+		CreatePR:      input.Render.CreatePR,
+		RenderOnly:    input.Render.RenderOnly,
+		DaggerVersion: input.Render.DaggerVersion,
+		Runner:        input.Render.Runner,
 	}
 
 	var renderOutput activities.RenderConfigOutput

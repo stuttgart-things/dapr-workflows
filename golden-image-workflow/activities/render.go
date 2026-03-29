@@ -14,10 +14,16 @@ type RenderConfigInput struct {
 	Repo         string `json:"repo"`
 	Ref          string `json:"ref"`
 	Token        string `json:"token"`
-	WorkflowFile string `json:"workflowFile"` // e.g. "render-config.yaml"
-	Environment  string `json:"environment"`
-	OSProfile    string `json:"osProfile"`
+	WorkflowFile string `json:"workflowFile"`
+	OSVersion    string `json:"osVersion"`    // e.g. "ubuntu24", "rocky9"
+	Lab          string `json:"lab"`           // e.g. "labul", "labda"
+	OSFamily     string `json:"osFamily"`      // e.g. "ubuntu", "rocky"
+	Provisioning string `json:"provisioning"`  // e.g. "base-os", "rke2-node"
 	Overrides    string `json:"overrides"`
+	CreatePR     string `json:"createPr"`      // "true" / "false"
+	RenderOnly   string `json:"renderOnly"`    // "true" / "false"
+	DaggerVersion string `json:"daggerVersion"`
+	Runner       string `json:"runner"`
 }
 
 type RenderConfigOutput struct {
@@ -37,17 +43,32 @@ func RenderConfigActivity(ctx workflow.ActivityContext) (any, error) {
 	client := gh.NewClient(input.Token)
 	bgCtx := context.Background()
 
+	inputs := map[string]string{
+		"os-version":   input.OSVersion,
+		"lab":          input.Lab,
+		"os-family":    input.OSFamily,
+		"provisioning": input.Provisioning,
+		"create-pr":    input.CreatePR,
+		"render-only":  input.RenderOnly,
+	}
+
+	if input.Overrides != "" {
+		inputs["overrides"] = input.Overrides
+	}
+	if input.DaggerVersion != "" {
+		inputs["dagger-version"] = input.DaggerVersion
+	}
+	if input.Runner != "" {
+		inputs["runner"] = input.Runner
+	}
+
 	dispatchTime := time.Now()
 	err := client.DispatchWorkflow(bgCtx, gh.DispatchWorkflowInput{
 		Owner:        input.Owner,
 		Repo:         input.Repo,
 		WorkflowFile: input.WorkflowFile,
 		Ref:          input.Ref,
-		Inputs: map[string]string{
-			"environment": input.Environment,
-			"os_profile":  input.OSProfile,
-			"overrides":   input.Overrides,
-		},
+		Inputs:       inputs,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("dispatch render workflow: %w", err)
@@ -76,6 +97,6 @@ func RenderConfigActivity(ctx workflow.ActivityContext) (any, error) {
 		RunID:      result.RunID,
 		Conclusion: result.Conclusion,
 		RunURL:     result.HTMLURL,
-		Message:    fmt.Sprintf("rendered config for %s/%s", input.Environment, input.OSProfile),
+		Message:    fmt.Sprintf("rendered config for %s/%s", input.Lab, input.OSVersion),
 	}, nil
 }

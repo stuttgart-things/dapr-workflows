@@ -1,0 +1,10 @@
+site_name: Dapr Workflows
+site_description: Dapr workflow orchestration for infrastructure automation
+
+nav:
+  - Home: index.md
+  - Setup:
+    - Dapr CLI: setup/dapr-cli.md
+
+plugins:
+  - techdocs-core

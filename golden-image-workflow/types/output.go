@@ -14,6 +14,17 @@ type GoldenImageBuildOutput struct {
 	StartedAt          string     `json:"startedAt"`
 	CompletedAt        string     `json:"completedAt"`
 	DurationSeconds    int        `json:"durationSeconds"`
+	StepRunURLs        StepRunURLs `json:"stepRunUrls"`
+}
+
+// StepRunURLs holds the GitHub Actions run URLs for each pipeline step (for observability).
+type StepRunURLs struct {
+	Render     string `json:"render,omitempty"`
+	CommitPR   string `json:"commitPr,omitempty"`
+	PackerBuild string `json:"packerBuild,omitempty"`
+	TestVM     string `json:"testVm,omitempty"`
+	Promote    string `json:"promote,omitempty"`
+	Notify     string `json:"notify,omitempty"`
 }
 
 type TestResult struct {

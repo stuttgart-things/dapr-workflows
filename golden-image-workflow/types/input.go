@@ -5,6 +5,7 @@ type GoldenImageBuildInput struct {
 	RunID       string         `json:"runID"`
 	Environment string         `json:"environment"` // "labul", "labda"
 	OSProfile   string         `json:"osProfile"`   // "ubuntu24", "rocky9"
+	GitHub      GitHubConfig   `json:"github"`
 	Render      RenderInput    `json:"render"`
 	Git         GitInput       `json:"git"`
 	Packer      PackerInput    `json:"packer"`
@@ -12,6 +13,14 @@ type GoldenImageBuildInput struct {
 	Promotion   PromotionInput `json:"promotion"`
 	Notify      NotifyInput    `json:"notify"`
 	Secrets     SecretsInput   `json:"secrets"`
+}
+
+// GitHubConfig holds the GitHub Actions dispatch configuration.
+type GitHubConfig struct {
+	Owner string `json:"owner"` // GitHub org or user
+	Repo  string `json:"repo"`  // target repo containing the GH Actions workflows
+	Ref   string `json:"ref"`   // branch ref for dispatch, e.g. "main"
+	Token string `json:"token"` // GitHub token (PAT or app token with actions:write)
 }
 
 type RenderInput struct {

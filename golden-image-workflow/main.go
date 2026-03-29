@@ -22,8 +22,20 @@ func main() {
 	if err := r.AddWorkflowN("GoldenImageBuildWorkflow", GoldenImageBuildWorkflow); err != nil {
 		log.Fatalf("failed to register workflow: %v", err)
 	}
-	if err := r.AddActivityN("RenderConfigActivity", activities.RenderConfigActivity); err != nil {
-		log.Fatalf("failed to register activity: %v", err)
+
+	activityRegistrations := map[string]func(workflow.ActivityContext) (any, error){
+		"RenderConfigActivity": activities.RenderConfigActivity,
+		"CommitPRActivity":     activities.CommitPRActivity,
+		"PackerBuildActivity":  activities.PackerBuildActivity,
+		"TestVMActivity":       activities.TestVMActivity,
+		"PromoteActivity":      activities.PromoteActivity,
+		"NotifyActivity":       activities.NotifyActivity,
+	}
+
+	for name, fn := range activityRegistrations {
+		if err := r.AddActivityN(name, fn); err != nil {
+			log.Fatalf("failed to register activity %s: %v", name, err)
+		}
 	}
 
 	// Create workflow client via Dapr sidecar
@@ -84,8 +96,26 @@ func runTestWorkflow(ctx context.Context, wfClient *workflow.Client) error {
 		RunID:       "test-001",
 		Environment: "labul",
 		OSProfile:   "ubuntu24",
+		GitHub: types.GitHubConfig{
+			Owner: "stuttgart-things",
+			Repo:  "golden-image-pipelines",
+			Ref:   "main",
+			Token: os.Getenv("GITHUB_TOKEN"),
+		},
 		Render: types.RenderInput{
 			Overrides: "vm_name=test-golden",
+		},
+		Git: types.GitInput{
+			BranchName:       "golden/labul-ubuntu24",
+			BaseBranch:       "main",
+			CommitMessage:    "feat: render golden image config for labul/ubuntu24",
+			PullRequestTitle: "Golden image: labul/ubuntu24",
+			PullRequestBody:  "Automated golden image build",
+		},
+		Packer: types.PackerInput{
+			ConfigFile:    "packer.pkr.hcl",
+			PackerVersion: "1.11",
+			Arch:          "amd64",
 		},
 	}
 

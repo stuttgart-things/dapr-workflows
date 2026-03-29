@@ -14,12 +14,15 @@ type PackerBuildInput struct {
 	Repo          string `json:"repo"`
 	Ref           string `json:"ref"`
 	Token         string `json:"token"`
-	WorkflowFile  string `json:"workflowFile"` // e.g. "packer-build.yaml"
-	ConfigFile    string `json:"configFile"`
+	WorkflowFile  string `json:"workflowFile"`
+	OSVersion     string `json:"osVersion"`
+	Lab           string `json:"lab"`
+	OSFamily      string `json:"osFamily"`
+	Provisioning  string `json:"provisioning"`
+	Branch        string `json:"branch"`        // branch with rendered packer config
 	PackerVersion string `json:"packerVersion"`
-	Arch          string `json:"arch"`
-	Environment   string `json:"environment"`
-	OSProfile     string `json:"osProfile"`
+	Runner        string `json:"runner"`
+	DaggerVersion string `json:"daggerVersion"`
 }
 
 type PackerBuildOutput struct {
@@ -39,19 +42,31 @@ func PackerBuildActivity(ctx workflow.ActivityContext) (any, error) {
 	client := gh.NewClient(input.Token)
 	bgCtx := context.Background()
 
+	inputs := map[string]string{
+		"os-version":   input.OSVersion,
+		"lab":          input.Lab,
+		"os-family":    input.OSFamily,
+		"provisioning": input.Provisioning,
+		"branch":       input.Branch,
+	}
+
+	if input.PackerVersion != "" {
+		inputs["packer-version"] = input.PackerVersion
+	}
+	if input.Runner != "" {
+		inputs["runner"] = input.Runner
+	}
+	if input.DaggerVersion != "" {
+		inputs["dagger-version"] = input.DaggerVersion
+	}
+
 	dispatchTime := time.Now()
 	err := client.DispatchWorkflow(bgCtx, gh.DispatchWorkflowInput{
 		Owner:        input.Owner,
 		Repo:         input.Repo,
 		WorkflowFile: input.WorkflowFile,
 		Ref:          input.Ref,
-		Inputs: map[string]string{
-			"config_file":    input.ConfigFile,
-			"packer_version": input.PackerVersion,
-			"arch":           input.Arch,
-			"environment":    input.Environment,
-			"os_profile":     input.OSProfile,
-		},
+		Inputs:       inputs,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("dispatch packer-build workflow: %w", err)
@@ -80,6 +95,6 @@ func PackerBuildActivity(ctx workflow.ActivityContext) (any, error) {
 		RunID:      result.RunID,
 		Conclusion: result.Conclusion,
 		RunURL:     result.HTMLURL,
-		Message:    fmt.Sprintf("packer build completed for %s/%s", input.Environment, input.OSProfile),
+		Message:    fmt.Sprintf("packer build completed for %s/%s", input.Lab, input.OSVersion),
 	}, nil
 }

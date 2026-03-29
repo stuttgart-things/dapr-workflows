@@ -1,0 +1,26 @@
+{
+  "runID": "",
+  "environment": "labda",
+  "osProfile": "ubuntu24",
+  "github": {
+    "owner": "stuttgart-things",
+    "repo": "stuttgart-things",
+    "ref": "main"
+  },
+  "render": {
+    "workflowFile": "dispatch-render-packer-config.yaml",
+    "osFamily": "ubuntu",
+    "provisioning": "base-os",
+    "overrides": "",
+    "createPr": "true",
+    "renderOnly": "false",
+    "daggerVersion": "0.20.0",
+    "runner": "dagger-labul"
+  },
+  "packer": {
+    "workflowFile": "dispatch-packer-build-dagger.yaml",
+    "packerVersion": "1.13.1",
+    "runner": "dagger-labul",
+    "daggerVersion": "0.20.0"
+  }
+}

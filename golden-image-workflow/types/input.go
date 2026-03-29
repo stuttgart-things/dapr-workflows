@@ -46,9 +46,10 @@ type GitInput struct {
 }
 
 type PackerInput struct {
-	ConfigFile    string `json:"configFile"`
+	WorkflowFile  string `json:"workflowFile"`  // e.g. "dispatch-packer-build-dagger.yaml"
 	PackerVersion string `json:"packerVersion"`
-	Arch          string `json:"arch"`
+	Runner        string `json:"runner"`
+	DaggerVersion string `json:"daggerVersion"`
 }
 
 type TestVMInput struct {

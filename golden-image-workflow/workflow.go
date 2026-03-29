@@ -24,7 +24,7 @@ func GoldenImageBuildWorkflow(ctx *workflow.WorkflowContext) (any, error) {
 
 	gh := input.GitHub
 
-	// Step 1: Render config
+	// Step 1: Render config + commit + PR (all handled by the render GH Action)
 	renderInput := activities.RenderConfigInput{
 		Owner:         gh.Owner,
 		Repo:          gh.Repo,
@@ -51,45 +51,26 @@ func GoldenImageBuildWorkflow(ctx *workflow.WorkflowContext) (any, error) {
 		return &output, err
 	}
 	output.StepRunURLs.Render = renderOutput.RunURL
-	fmt.Printf("render completed: %s\n", renderOutput.Message)
+	fmt.Printf("render + commit completed: %s\n", renderOutput.Message)
 
-	// Step 2: Commit and PR
-	commitPRInput := activities.CommitPRInput{
-		Owner:        gh.Owner,
-		Repo:         gh.Repo,
-		Ref:          gh.Ref,
-		Token:        gh.Token,
-		WorkflowFile: "commit-pr.yaml",
-		BranchName:   input.Git.BranchName,
-		BaseBranch:   input.Git.BaseBranch,
-		CommitMsg:    input.Git.CommitMessage,
-		PRTitle:      input.Git.PullRequestTitle,
-		PRBody:       input.Git.PullRequestBody,
-	}
-
-	var commitPROutput activities.CommitPROutput
-	if err := ctx.CallActivity(activities.CommitPRActivity, workflow.WithActivityInput(commitPRInput)).Await(&commitPROutput); err != nil {
-		output.Status = "failed"
-		output.FailedStep = "CommitPR"
-		output.Error = err.Error()
-		output.StepRunURLs.CommitPR = commitPROutput.RunURL
-		return &output, err
-	}
-	output.StepRunURLs.CommitPR = commitPROutput.RunURL
-	fmt.Printf("commit/PR completed: %s\n", commitPROutput.Message)
-
-	// Step 3: Packer build
+	// Step 2: Packer build
+	// The branch name comes from the render step's convention:
+	// feat/rendered-{os-version}-{lab}-{provisioning}
+	packerBranch := fmt.Sprintf("feat/rendered-%s-%s-%s", input.OSProfile, input.Environment, input.Render.Provisioning)
 	packerInput := activities.PackerBuildInput{
 		Owner:         gh.Owner,
 		Repo:          gh.Repo,
 		Ref:           gh.Ref,
 		Token:         gh.Token,
-		WorkflowFile:  "packer-build.yaml",
-		ConfigFile:    input.Packer.ConfigFile,
+		WorkflowFile:  input.Packer.WorkflowFile,
+		OSVersion:     input.OSProfile,
+		Lab:           input.Environment,
+		OSFamily:      input.Render.OSFamily,
+		Provisioning:  input.Render.Provisioning,
+		Branch:        packerBranch,
 		PackerVersion: input.Packer.PackerVersion,
-		Arch:          input.Packer.Arch,
-		Environment:   input.Environment,
-		OSProfile:     input.OSProfile,
+		Runner:        input.Packer.Runner,
+		DaggerVersion: input.Packer.DaggerVersion,
 	}
 
 	var packerOutput activities.PackerBuildOutput

@@ -25,7 +25,6 @@ func main() {
 
 	activityRegistrations := map[string]func(workflow.ActivityContext) (any, error){
 		"RenderConfigActivity": activities.RenderConfigActivity,
-		"CommitPRActivity":     activities.CommitPRActivity,
 		"PackerBuildActivity":  activities.PackerBuildActivity,
 		"TestVMActivity":       activities.TestVMActivity,
 		"PromoteActivity":      activities.PromoteActivity,
@@ -58,10 +57,21 @@ func main() {
 	time.Sleep(2 * time.Second)
 	log.Println("workflow worker started")
 
-	// If --run flag is passed, start a test workflow instance and exit
+	// If --run flag is passed, start a workflow from JSON input file and exit
 	if len(os.Args) > 1 && os.Args[1] == "--run" {
-		if err := runTestWorkflow(ctx, wfClient); err != nil {
-			log.Fatalf("test workflow failed: %v", err)
+		inputFile := ""
+		if len(os.Args) > 3 && os.Args[2] == "--input" {
+			inputFile = os.Args[3]
+		} else if len(os.Args) > 2 {
+			inputFile = os.Args[2]
+		}
+
+		if inputFile == "" {
+			log.Fatal("usage: golden-image-workflow --run --input <file.json>")
+		}
+
+		if err := runWorkflowFromFile(ctx, wfClient, inputFile); err != nil {
+			log.Fatalf("workflow failed: %v", err)
 		}
 		return
 	}
@@ -91,42 +101,30 @@ func main() {
 	server.Shutdown(context.Background())
 }
 
-func runTestWorkflow(ctx context.Context, wfClient *workflow.Client) error {
-	input := types.GoldenImageBuildInput{
-		RunID:       "test-001",
-		Environment: "labul",
-		OSProfile:   "ubuntu24",
-		GitHub: types.GitHubConfig{
-			Owner: "stuttgart-things",
-			Repo:  "stuttgart-things",
-			Ref:   "main",
-			Token: os.Getenv("GITHUB_TOKEN"),
-		},
-		Render: types.RenderInput{
-			WorkflowFile:  "dispatch-render-packer-config.yaml",
-			OSFamily:      "ubuntu",
-			Provisioning:  "base-os",
-			Overrides:     "vm_name=test-golden",
-			CreatePR:      "false",
-			RenderOnly:    "true",
-			DaggerVersion: "0.20.0",
-			Runner:        "dagger-labul",
-		},
-		Git: types.GitInput{
-			BranchName:       "golden/labul-ubuntu24",
-			BaseBranch:       "main",
-			CommitMessage:    "feat: render golden image config for labul/ubuntu24",
-			PullRequestTitle: "Golden image: labul/ubuntu24",
-			PullRequestBody:  "Automated golden image build",
-		},
-		Packer: types.PackerInput{
-			ConfigFile:    "packer.pkr.hcl",
-			PackerVersion: "1.11",
-			Arch:          "amd64",
-		},
+func runWorkflowFromFile(ctx context.Context, wfClient *workflow.Client, inputFile string) error {
+	data, err := os.ReadFile(inputFile)
+	if err != nil {
+		return fmt.Errorf("read input file %s: %w", inputFile, err)
 	}
 
-	instanceID := fmt.Sprintf("test-%d", time.Now().Unix())
+	var input types.GoldenImageBuildInput
+	if err := json.Unmarshal(data, &input); err != nil {
+		return fmt.Errorf("parse input file: %w", err)
+	}
+
+	// Allow GITHUB_TOKEN from env to override empty token in JSON
+	if input.GitHub.Token == "" {
+		input.GitHub.Token = os.Getenv("GITHUB_TOKEN")
+	}
+
+	if input.GitHub.Token == "" {
+		return fmt.Errorf("no GitHub token: set 'github.token' in JSON or GITHUB_TOKEN env var")
+	}
+
+	instanceID := fmt.Sprintf("%s-%s-%d", input.Environment, input.OSProfile, time.Now().Unix())
+	if input.RunID != "" {
+		instanceID = input.RunID
+	}
 
 	id, err := wfClient.ScheduleWorkflow(ctx, "GoldenImageBuildWorkflow",
 		workflow.WithInstanceID(instanceID),
@@ -173,6 +171,11 @@ func startWorkflowHandler(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 		http.Error(w, fmt.Sprintf("invalid input: %v", err), http.StatusBadRequest)
 		return
+	}
+
+	// Allow GITHUB_TOKEN from env if not in payload
+	if input.GitHub.Token == "" {
+		input.GitHub.Token = os.Getenv("GITHUB_TOKEN")
 	}
 
 	wfClient, err := dapr.NewWorkflowClient()

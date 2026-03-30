@@ -1,0 +1,56 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: golden-image-workflow
+  namespace: golden-image
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: golden-image-workflow
+  template:
+    metadata:
+      labels:
+        app: golden-image-workflow
+      annotations:
+        dapr.io/enabled: "true"
+        dapr.io/app-id: "golden-image"
+        dapr.io/app-port: "8080"
+        dapr.io/enable-api-logging: "true"
+    spec:
+      containers:
+        - name: workflow
+          image: ttl.sh/stuttgart-things/golden-image-workflow:1h
+          ports:
+            - containerPort: 8080
+          env:
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: github-token
+                  key: token
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: golden-image-workflow
+  namespace: golden-image
+spec:
+  selector:
+    app: golden-image-workflow
+  ports:
+    - port: 8080
+      targetPort: 8080

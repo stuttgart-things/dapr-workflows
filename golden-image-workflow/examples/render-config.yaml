@@ -1,0 +1,46 @@
+---
+# Example GitHub Actions workflow for the "render config" step.
+# This workflow is triggered by the Dapr golden-image-workflow via workflow_dispatch.
+# Place this file (or a similar one) in the target repo under .github/workflows/.
+name: Render Config
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment (e.g. labul, labda)"
+        required: true
+        type: string
+      os_profile:
+        description: "OS profile (e.g. ubuntu24, rocky9)"
+        required: true
+        type: string
+      overrides:
+        description: "Override key=value pairs"
+        required: false
+        type: string
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Dagger
+        uses: dagger/dagger-for-github@v6
+        with:
+          verb: call
+          module: .
+          args: >-
+            render-build-config
+            --environment=${{ inputs.environment }}
+            --os-profile=${{ inputs.os_profile }}
+            --overrides="${{ inputs.overrides }}"
+            export --path=rendered/
+
+      - name: Upload rendered config
+        uses: actions/upload-artifact@v4
+        with:
+          name: rendered-config-${{ inputs.environment }}-${{ inputs.os_profile }}
+          path: rendered/

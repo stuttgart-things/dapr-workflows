@@ -1,0 +1,137 @@
+---
+name: Dispatch Move Packer Template
+on:
+  workflow_dispatch:
+    inputs:
+      template-name:
+        description: "Source template name (e.g., ubuntu24-base-20260330-0837)"
+        required: true
+        type: string
+      target-name:
+        description: "Target golden image name (e.g., ubuntu24-base-os)"
+        required: true
+        type: string
+      build-folder:
+        description: "vSphere folder where packer builds templates"
+        required: false
+        type: string
+        default: "/LabUL/vm/stuttgart-things/packer"
+      golden-folder:
+        description: "vSphere folder for golden images"
+        required: false
+        type: string
+        default: "/LabUL/vm/stuttgart-things/vm-templates"
+      lab:
+        type: choice
+        description: Lab environment
+        options:
+          - labul
+          - labda
+      runner:
+        description: Runner name
+        required: false
+        type: string
+        default: dagger-labul
+      dagger-version:
+        description: Dagger version
+        required: false
+        type: string
+        default: "0.20.0"
+
+permissions:
+  contents: read
+
+env:
+  SOPS_SECRETS_FILE: terraform/secrets/${{ inputs.lab }}.tfvars.enc.json
+
+jobs:
+  move-template:
+    runs-on: ${{ inputs.runner }}
+    environment: k8s
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Extract vCenter credentials from SOPS
+        env:
+          SOPS_AGE_KEY: ${{ secrets.SOPS_AGE_KEY }}
+        run: |
+          VCENTER_SERVER=$(sops -d --extract '["vsphere_server"]' ${{ env.SOPS_SECRETS_FILE }})
+          VCENTER_USER=$(sops -d --extract '["vsphere_user"]' ${{ env.SOPS_SECRETS_FILE }})
+          VCENTER_PASSWORD=$(sops -d --extract '["vsphere_password"]' ${{ env.SOPS_SECRETS_FILE }})
+
+          echo "VCENTER_FQDN=https://${VCENTER_SERVER}/sdk" >> $GITHUB_ENV
+          echo "::add-mask::${VCENTER_SERVER}"
+          echo "::add-mask::${VCENTER_USER}"
+          echo "::add-mask::${VCENTER_PASSWORD}"
+          echo "VCENTER_USER=${VCENTER_USER}" >> $GITHUB_ENV
+          echo "VCENTER_PASSWORD=${VCENTER_PASSWORD}" >> $GITHUB_ENV
+
+      - name: Rename template to golden image name
+        uses: dagger/dagger-for-github@v7
+        env:
+          VCENTER_FQDN: ${{ env.VCENTER_FQDN }}
+          VCENTER_USER: ${{ env.VCENTER_USER }}
+          VCENTER_PASSWORD: ${{ env.VCENTER_PASSWORD }}
+        with:
+          version: ${{ inputs.dagger-version }}
+          verb: call
+          module: github.com/stuttgart-things/dagger/packer
+          args: >-
+            vcenteroperation
+            --operation rename
+            --vcenter env:VCENTER_FQDN
+            --username env:VCENTER_USER
+            --password env:VCENTER_PASSWORD
+            --source "${{ inputs.build-folder }}/${{ inputs.template-name }}"
+            --target "${{ inputs.target-name }}"
+
+      - name: Delete existing golden image (if exists)
+        continue-on-error: true
+        uses: dagger/dagger-for-github@v7
+        env:
+          VCENTER_FQDN: ${{ env.VCENTER_FQDN }}
+          VCENTER_USER: ${{ env.VCENTER_USER }}
+          VCENTER_PASSWORD: ${{ env.VCENTER_PASSWORD }}
+        with:
+          version: ${{ inputs.dagger-version }}
+          verb: call
+          module: github.com/stuttgart-things/dagger/packer
+          args: >-
+            vcenteroperation
+            --operation delete
+            --vcenter env:VCENTER_FQDN
+            --username env:VCENTER_USER
+            --password env:VCENTER_PASSWORD
+            --source "${{ inputs.golden-folder }}/${{ inputs.target-name }}"
+            --target template
+
+      - name: Move template to golden image folder
+        uses: dagger/dagger-for-github@v7
+        env:
+          VCENTER_FQDN: ${{ env.VCENTER_FQDN }}
+          VCENTER_USER: ${{ env.VCENTER_USER }}
+          VCENTER_PASSWORD: ${{ env.VCENTER_PASSWORD }}
+        with:
+          version: ${{ inputs.dagger-version }}
+          verb: call
+          module: github.com/stuttgart-things/dagger/packer
+          args: >-
+            vcenteroperation
+            --operation move
+            --vcenter env:VCENTER_FQDN
+            --username env:VCENTER_USER
+            --password env:VCENTER_PASSWORD
+            --source "${{ inputs.build-folder }}/${{ inputs.target-name }}"
+            --target "${{ inputs.golden-folder }}"
+
+      - name: Summary
+        run: |
+          {
+            echo '## Template Promotion Results'
+            echo ''
+            echo '- **Source**: ${{ inputs.template-name }}'
+            echo '- **Target**: ${{ inputs.target-name }}'
+            echo '- **Folder**: ${{ inputs.golden-folder }}'
+            echo '- **Status**: Promoted'
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,129 @@
+---
+name: Dispatch Packer Build (Dagger)
+on:
+  workflow_dispatch:
+    inputs:
+      os-version:
+        type: choice
+        description: OS version
+        options:
+          - ubuntu24
+          - ubuntu25
+          - rocky9
+      lab:
+        type: choice
+        description: Lab environment
+        options:
+          - labul
+          - labda
+      os-family:
+        type: choice
+        description: OS family
+        options:
+          - ubuntu
+          - rocky
+      provisioning:
+        type: choice
+        description: Ansible provisioning profile
+        options:
+          - base-os
+          - rke2-node
+      branch:
+        description: "Branch containing the rendered packer config"
+        required: true
+        type: string
+      packer-version:
+        description: Packer version
+        required: false
+        type: string
+        default: "1.13.1"
+      runner:
+        description: Runner name
+        required: false
+        type: string
+        default: dagger-labul
+      dagger-version:
+        description: Dagger version
+        required: false
+        type: string
+        default: "0.20.0"
+
+permissions:
+  contents: read
+
+env:
+  BUILD_DIR: packer/builds/${{ inputs.os-version }}-${{ inputs.lab }}-vsphere-${{ inputs.provisioning }}
+
+jobs:
+  build-packer-template:
+    runs-on: ${{ inputs.runner }}
+    environment: k8s
+    outputs:
+      template-name: ${{ steps.build.outputs.template_name }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.branch }}
+          fetch-depth: 0
+
+      - name: Install Dagger
+        uses: dagger/dagger-for-github@v7
+        with:
+          version: ${{ inputs.dagger-version }}
+
+      - name: Find HCL build file
+        id: find-hcl
+        run: |
+          HCL_FILE=$(ls ${{ env.BUILD_DIR }}/*.pkr.hcl 2>/dev/null | head -1)
+          if [ -z "$HCL_FILE" ]; then
+            echo "No .pkr.hcl file found in ${{ env.BUILD_DIR }}"
+            exit 1
+          fi
+          echo "hcl_file=$HCL_FILE" >> "$GITHUB_OUTPUT"
+          echo "Found HCL file: $HCL_FILE"
+
+      - name: Build Packer Template with Dagger
+        id: build
+        env:
+          VAULT_ROLE_ID: ${{ secrets.VAULT_ROLE_ID }}
+          VAULT_SECRET_ID: ${{ secrets.VAULT_SECRET_ID }}
+          VAULT_TOKEN: ${{ secrets.VAULT_TOKEN }}
+        run: |
+          PACKER_LOG=$(dagger call -m github.com/stuttgart-things/dagger/packer \
+            bake \
+            --local-dir . \
+            --build-path ${{ steps.find-hcl.outputs.hcl_file }} \
+            --packer-version ${{ inputs.packer-version }} \
+            --vault-addr ${{ secrets.VAULT_ADDR }} \
+            --vault-role-id env:VAULT_ROLE_ID \
+            --vault-secret-id env:VAULT_SECRET_ID \
+            --vault-token env:VAULT_TOKEN \
+            --progress plain 2>&1 | tee /tmp/packer.log)
+
+          TEMPLATE_NAME=$(grep -oP 'artifact \[\\]string\{"0", "id", "\K[^"]+' /tmp/packer.log || echo "")
+
+          if [ -z "$TEMPLATE_NAME" ]; then
+            echo "WARNING: Could not extract template name from packer log"
+            TEMPLATE_NAME="${{ inputs.os-version }}-${{ inputs.provisioning }}-$(date +%Y%m%d-%H%M)"
+          fi
+
+          echo "template_name=$TEMPLATE_NAME" >> "$GITHUB_OUTPUT"
+          echo "Template name: $TEMPLATE_NAME"
+
+      - name: Upload Packer logfile
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: packer-log-${{ inputs.os-version }}-${{ inputs.lab }}
+          path: /tmp/packer.log
+
+      - name: Summary
+        run: |
+          echo "## Packer Build Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **OS**: ${{ inputs.os-version }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Lab**: ${{ inputs.lab }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Provisioning**: ${{ inputs.provisioning }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Branch**: ${{ inputs.branch }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Template**: ${{ steps.build.outputs.template_name }}" >> $GITHUB_STEP_SUMMARY

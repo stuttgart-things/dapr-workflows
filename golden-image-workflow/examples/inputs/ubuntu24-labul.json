@@ -30,5 +30,13 @@
     "overrides": "",
     "runner": "dagger-labul",
     "daggerVersion": "0.20.0"
+  },
+  "promotion": {
+    "enabled": true,
+    "workflowFile": "dispatch-packer-movetemplate.yaml",
+    "targetName": "ubuntu24-base-os",
+    "buildFolder": "/LabUL/vm/stuttgart-things/packer",
+    "goldenFolder": "/LabUL/vm/stuttgart-things/vm-templates",
+    "runner": "ghr-stuttgart-things-skyami-cicd"
   }
 }

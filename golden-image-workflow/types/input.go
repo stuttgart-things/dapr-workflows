@@ -62,9 +62,12 @@ type TestVMInput struct {
 }
 
 type PromotionInput struct {
-	Enabled              bool   `json:"enabled"`
-	GoldenTemplateName   string `json:"goldenTemplateName"`
-	GoldenTemplateFolder string `json:"goldenTemplateFolder"`
+	Enabled      bool   `json:"enabled"`
+	WorkflowFile string `json:"workflowFile"` // e.g. "dispatch-packer-movetemplate.yaml"
+	TargetName   string `json:"targetName"`   // golden image name, e.g. "ubuntu24-base-os"
+	BuildFolder  string `json:"buildFolder"`  // vSphere packer build folder
+	GoldenFolder string `json:"goldenFolder"` // vSphere golden image folder
+	Runner       string `json:"runner"`
 }
 
 type NotifyInput struct {

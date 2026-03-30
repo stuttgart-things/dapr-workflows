@@ -1,0 +1,97 @@
+---
+name: Dispatch Move Packer Template
+on:
+  workflow_dispatch:
+    inputs:
+      template-name:
+        description: "Source template name (e.g., ubuntu24-base-20260330-0837)"
+        required: true
+        type: string
+      target-name:
+        description: "Target golden image name (e.g., ubuntu24-base-os)"
+        required: true
+        type: string
+      build-folder:
+        description: "vSphere folder where packer builds templates"
+        required: false
+        type: string
+        default: "/LabUL/vm/stuttgart-things/packer"
+      golden-folder:
+        description: "vSphere folder for golden images"
+        required: false
+        type: string
+        default: "/LabUL/vm/stuttgart-things/vm-templates"
+      runner:
+        description: Runner name
+        required: false
+        type: string
+        default: ghr-stuttgart-things-skyami-cicd
+
+permissions:
+  contents: read
+
+jobs:
+  move-template:
+    runs-on: ${{ inputs.runner }}
+    environment: k8s
+    container:
+      image: eu.gcr.io/stuttgart-things/sthings-packer:1.11.2-10.4.0
+    env:
+      GOVC_INSECURE: "true"
+      VAULT_ADDR: ${{ secrets.VAULT_ADDR }}
+      VAULT_AUTH_METHOD: ${{ secrets.VAULT_AUTH_METHOD }}
+      VAULT_NAMESPACE: ${{ secrets.VAULT_NAMESPACE }}
+      VAULT_ROLE_ID: ${{ secrets.VAULT_ROLE_ID }}
+      VAULT_SECRET_ID: ${{ secrets.VAULT_SECRET_ID }}
+    steps:
+      - name: Set govc credentials
+        run: |
+          USER=$(machineshop get --path cloud/data/vsphere:username | tail -n +8)
+          PW=$(machineshop get --path cloud/data/vsphere:password | tail -n +8)
+          FQDN=$(machineshop get --path cloud/data/vsphere:ip | tail -n +8)
+          echo "GOVC_URL=https://${USER}:${PW}@${FQDN}/sdk" >> $GITHUB_ENV
+
+      - name: Check source template exists
+        run: |
+          echo "Checking build folder: ${{ inputs.build-folder }}"
+          govc ls "${{ inputs.build-folder }}"
+          govc ls "${{ inputs.build-folder }}/${{ inputs.template-name }}" || {
+            echo "ERROR: Template ${{ inputs.template-name }} not found in ${{ inputs.build-folder }}"
+            exit 1
+          }
+
+      - name: Rename template to golden image name
+        run: |
+          echo "Renaming ${{ inputs.template-name }} -> ${{ inputs.target-name }}"
+          govc object.rename \
+            "${{ inputs.build-folder }}/${{ inputs.template-name }}" \
+            "${{ inputs.target-name }}"
+
+      - name: Delete existing golden image (if exists)
+        run: |
+          echo "Deleting existing golden image (if any): ${{ inputs.golden-folder }}/${{ inputs.target-name }}"
+          govc object.destroy \
+            "${{ inputs.golden-folder }}/${{ inputs.target-name }}" || true
+
+      - name: Move template to golden image folder
+        run: |
+          echo "Moving ${{ inputs.target-name }} to ${{ inputs.golden-folder }}"
+          govc object.mv \
+            "${{ inputs.build-folder }}/${{ inputs.target-name }}" \
+            "${{ inputs.golden-folder }}"
+
+      - name: Verify golden image
+        run: |
+          echo "Golden image folder contents:"
+          govc ls "${{ inputs.golden-folder }}"
+
+      - name: Summary
+        run: |
+          {
+            echo '## Template Promotion Results'
+            echo ''
+            echo '- **Source**: ${{ inputs.template-name }}'
+            echo '- **Target**: ${{ inputs.target-name }}'
+            echo '- **Folder**: ${{ inputs.golden-folder }}'
+            echo '- **Status**: Promoted'
+          } >> "$GITHUB_STEP_SUMMARY"

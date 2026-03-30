@@ -10,15 +10,16 @@ import (
 )
 
 type PromoteInput struct {
-	Owner              string `json:"owner"`
-	Repo               string `json:"repo"`
-	Ref                string `json:"ref"`
-	Token              string `json:"token"`
-	WorkflowFile       string `json:"workflowFile"` // e.g. "promote.yaml"
-	TemplateName       string `json:"templateName"`
-	GoldenTemplateName string `json:"goldenTemplateName"`
-	TemplateFolder     string `json:"templateFolder"`
-	Environment        string `json:"environment"`
+	Owner        string `json:"owner"`
+	Repo         string `json:"repo"`
+	Ref          string `json:"ref"`
+	Token        string `json:"token"`
+	WorkflowFile string `json:"workflowFile"`
+	TemplateName string `json:"templateName"` // source template from packer build
+	TargetName   string `json:"targetName"`   // golden image name
+	BuildFolder  string `json:"buildFolder"`  // vSphere packer build folder
+	GoldenFolder string `json:"goldenFolder"` // vSphere golden image folder
+	Runner       string `json:"runner"`
 }
 
 type PromoteOutput struct {
@@ -38,18 +39,28 @@ func PromoteActivity(ctx workflow.ActivityContext) (any, error) {
 	client := gh.NewClient(input.Token)
 	bgCtx := context.Background()
 
+	inputs := map[string]string{
+		"template-name": input.TemplateName,
+		"target-name":   input.TargetName,
+	}
+
+	if input.BuildFolder != "" {
+		inputs["build-folder"] = input.BuildFolder
+	}
+	if input.GoldenFolder != "" {
+		inputs["golden-folder"] = input.GoldenFolder
+	}
+	if input.Runner != "" {
+		inputs["runner"] = input.Runner
+	}
+
 	dispatchTime := time.Now()
 	err := client.DispatchWorkflow(bgCtx, gh.DispatchWorkflowInput{
 		Owner:        input.Owner,
 		Repo:         input.Repo,
 		WorkflowFile: input.WorkflowFile,
 		Ref:          input.Ref,
-		Inputs: map[string]string{
-			"template_name":        input.TemplateName,
-			"golden_template_name": input.GoldenTemplateName,
-			"template_folder":      input.TemplateFolder,
-			"environment":          input.Environment,
-		},
+		Inputs:       inputs,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("dispatch promote workflow: %w", err)
@@ -78,6 +89,6 @@ func PromoteActivity(ctx workflow.ActivityContext) (any, error) {
 		RunID:      result.RunID,
 		Conclusion: result.Conclusion,
 		RunURL:     result.HTMLURL,
-		Message:    fmt.Sprintf("promoted %s to %s", input.TemplateName, input.GoldenTemplateName),
+		Message:    fmt.Sprintf("promoted %s to %s", input.TemplateName, input.TargetName),
 	}, nil
 }

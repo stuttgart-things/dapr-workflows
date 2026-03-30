@@ -117,18 +117,19 @@ func GoldenImageBuildWorkflow(ctx *workflow.WorkflowContext) (any, error) {
 		fmt.Printf("test VM completed: %s\n", testVMOutput.Message)
 	}
 
-	// Step 5: Promote golden image (optional)
+	// Step 4: Promote golden image (optional)
 	if input.Promotion.Enabled {
 		promoteInput := activities.PromoteInput{
-			Owner:              gh.Owner,
-			Repo:               gh.Repo,
-			Ref:                gh.Ref,
-			Token:              gh.Token,
-			WorkflowFile:       "promote.yaml",
-			TemplateName:       fmt.Sprintf("%s-%s", input.Environment, input.OSProfile),
-			GoldenTemplateName: input.Promotion.GoldenTemplateName,
-			TemplateFolder:     input.Promotion.GoldenTemplateFolder,
-			Environment:        input.Environment,
+			Owner:        gh.Owner,
+			Repo:         gh.Repo,
+			Ref:          gh.Ref,
+			Token:        gh.Token,
+			WorkflowFile: input.Promotion.WorkflowFile,
+			TemplateName: packerOutput.TemplateName,
+			TargetName:   input.Promotion.TargetName,
+			BuildFolder:  input.Promotion.BuildFolder,
+			GoldenFolder: input.Promotion.GoldenFolder,
+			Runner:       input.Promotion.Runner,
 		}
 
 		var promoteOutput activities.PromoteOutput
@@ -141,7 +142,7 @@ func GoldenImageBuildWorkflow(ctx *workflow.WorkflowContext) (any, error) {
 		}
 		output.StepRunURLs.Promote = promoteOutput.RunURL
 		output.PromotionStatus = "promoted"
-		output.GoldenTemplateName = input.Promotion.GoldenTemplateName
+		output.GoldenTemplateName = input.Promotion.TargetName
 		fmt.Printf("promotion completed: %s\n", promoteOutput.Message)
 	}
 

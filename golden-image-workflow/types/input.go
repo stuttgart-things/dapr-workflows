@@ -53,12 +53,12 @@ type PackerInput struct {
 }
 
 type TestVMInput struct {
-	Enabled              bool   `json:"enabled"`
-	VMName               string `json:"vmName"`
-	AnsiblePlaybooks     string `json:"ansiblePlaybooks"`
-	AnsibleParameters    string `json:"ansibleParameters"`
-	AnsibleInventoryType string `json:"ansibleInventoryType"`
-	AnsibleWaitTimeout   int    `json:"ansibleWaitTimeout"`
+	Enabled       bool   `json:"enabled"`
+	WorkflowFile  string `json:"workflowFile"`  // e.g. "dispatch-packer-testvm-dagger.yaml"
+	TestPlaybooks string `json:"testPlaybooks"` // comma-separated playbook paths
+	Overrides     string `json:"overrides"`
+	Runner        string `json:"runner"`
+	DaggerVersion string `json:"daggerVersion"`
 }
 
 type PromotionInput struct {

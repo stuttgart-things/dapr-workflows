@@ -26,10 +26,11 @@ type PackerBuildInput struct {
 }
 
 type PackerBuildOutput struct {
-	RunID      int64  `json:"runID"`
-	Conclusion string `json:"conclusion"`
-	RunURL     string `json:"runUrl"`
-	Message    string `json:"message"`
+	RunID        int64  `json:"runID"`
+	Conclusion   string `json:"conclusion"`
+	RunURL       string `json:"runUrl"`
+	TemplateName string `json:"templateName"`
+	Message      string `json:"message"`
 }
 
 // PackerBuildActivity dispatches a GH Actions workflow for the Packer build and waits for completion.
@@ -91,10 +92,18 @@ func PackerBuildActivity(ctx workflow.ActivityContext) (any, error) {
 		}, fmt.Errorf("packer-build workflow concluded with: %s", result.Conclusion)
 	}
 
+	// Extract template name from job logs
+	templateName := ""
+	logText, err := client.GetRunLog(bgCtx, input.Owner, input.Repo, runID)
+	if err == nil {
+		templateName = gh.ExtractFromLog(logText, "Template name")
+	}
+
 	return &PackerBuildOutput{
-		RunID:      result.RunID,
-		Conclusion: result.Conclusion,
-		RunURL:     result.HTMLURL,
-		Message:    fmt.Sprintf("packer build completed for %s/%s", input.Lab, input.OSVersion),
+		RunID:        result.RunID,
+		Conclusion:   result.Conclusion,
+		RunURL:       result.HTMLURL,
+		TemplateName: templateName,
+		Message:      fmt.Sprintf("packer build completed for %s/%s, template: %s", input.Lab, input.OSVersion, templateName),
 	}, nil
 }

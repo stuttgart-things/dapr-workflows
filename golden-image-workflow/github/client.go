@@ -190,6 +190,69 @@ func (c *Client) WaitForCompletion(ctx context.Context, owner, repo string, runI
 	return nil, fmt.Errorf("timed out waiting for run %d to complete after %v", runID, timeout)
 }
 
+// GetRunLog fetches the combined log text for a workflow run.
+// It requests the logs download URL and reads the response body.
+// Note: GH API returns a redirect to a zip, but with Accept: text we get plaintext for job logs.
+func (c *Client) GetRunLog(ctx context.Context, owner, repo string, runID int64) (string, error) {
+	// Get jobs for this run and fetch logs per job
+	url := fmt.Sprintf("%s/repos/%s/%s/actions/runs/%d/jobs?per_page=30",
+		c.baseURL(), owner, repo, runID)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", fmt.Errorf("create jobs request: %w", err)
+	}
+	c.setHeaders(req)
+
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("jobs request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var jobsResp struct {
+		Jobs []struct {
+			ID int64 `json:"id"`
+		} `json:"jobs"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&jobsResp); err != nil {
+		return "", fmt.Errorf("decode jobs response: %w", err)
+	}
+
+	var allLogs strings.Builder
+	for _, job := range jobsResp.Jobs {
+		jobLogURL := fmt.Sprintf("%s/repos/%s/%s/actions/jobs/%d/logs",
+			c.baseURL(), owner, repo, job.ID)
+
+		logReq, err := http.NewRequestWithContext(ctx, http.MethodGet, jobLogURL, nil)
+		if err != nil {
+			continue
+		}
+		c.setHeaders(logReq)
+
+		// Use a client that follows redirects (default behavior)
+		logResp, err := c.HTTP.Do(logReq)
+		if err != nil {
+			continue
+		}
+		body, _ := io.ReadAll(logResp.Body)
+		logResp.Body.Close()
+		allLogs.Write(body)
+	}
+
+	return allLogs.String(), nil
+}
+
+// ExtractFromLog searches the run log for a line matching "key: value" and returns the value.
+func ExtractFromLog(log, key string) string {
+	for _, line := range strings.Split(log, "\n") {
+		if idx := strings.Index(line, key+": "); idx != -1 {
+			return strings.TrimSpace(line[idx+len(key)+2:])
+		}
+	}
+	return ""
+}
+
 func (c *Client) baseURL() string {
 	if c.BaseURL != "" {
 		return c.BaseURL

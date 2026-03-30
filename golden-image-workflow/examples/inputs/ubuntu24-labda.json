@@ -22,5 +22,13 @@
     "packerVersion": "1.13.1",
     "runner": "dagger-labul",
     "daggerVersion": "0.20.0"
+  },
+  "testVM": {
+    "enabled": true,
+    "workflowFile": "dispatch-packer-testvm-dagger.yaml",
+    "testPlaybooks": "",
+    "overrides": "",
+    "runner": "dagger-labul",
+    "daggerVersion": "0.20.0"
   }
 }

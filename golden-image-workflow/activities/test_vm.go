@@ -10,16 +10,19 @@ import (
 )
 
 type TestVMInput struct {
-	Owner        string `json:"owner"`
-	Repo         string `json:"repo"`
-	Ref          string `json:"ref"`
-	Token        string `json:"token"`
-	WorkflowFile string `json:"workflowFile"` // e.g. "test-vm.yaml"
-	VMName       string `json:"vmName"`
-	Playbooks    string `json:"playbooks"`
-	Parameters   string `json:"parameters"`
-	Environment  string `json:"environment"`
-	OSProfile    string `json:"osProfile"`
+	Owner         string `json:"owner"`
+	Repo          string `json:"repo"`
+	Ref           string `json:"ref"`
+	Token         string `json:"token"`
+	WorkflowFile  string `json:"workflowFile"`
+	TemplateName  string `json:"templateName"`  // from packer build output
+	OSVersion     string `json:"osVersion"`
+	Lab           string `json:"lab"`
+	OSFamily      string `json:"osFamily"`
+	TestPlaybooks string `json:"testPlaybooks"` // comma-separated
+	Overrides     string `json:"overrides"`
+	Runner        string `json:"runner"`
+	DaggerVersion string `json:"daggerVersion"`
 }
 
 type TestVMOutput struct {
@@ -39,19 +42,33 @@ func TestVMActivity(ctx workflow.ActivityContext) (any, error) {
 	client := gh.NewClient(input.Token)
 	bgCtx := context.Background()
 
+	inputs := map[string]string{
+		"template-name": input.TemplateName,
+		"os-version":    input.OSVersion,
+		"lab":           input.Lab,
+		"os-family":     input.OSFamily,
+	}
+
+	if input.TestPlaybooks != "" {
+		inputs["test-playbooks"] = input.TestPlaybooks
+	}
+	if input.Overrides != "" {
+		inputs["overrides"] = input.Overrides
+	}
+	if input.Runner != "" {
+		inputs["runner"] = input.Runner
+	}
+	if input.DaggerVersion != "" {
+		inputs["dagger-version"] = input.DaggerVersion
+	}
+
 	dispatchTime := time.Now()
 	err := client.DispatchWorkflow(bgCtx, gh.DispatchWorkflowInput{
 		Owner:        input.Owner,
 		Repo:         input.Repo,
 		WorkflowFile: input.WorkflowFile,
 		Ref:          input.Ref,
-		Inputs: map[string]string{
-			"vm_name":     input.VMName,
-			"playbooks":   input.Playbooks,
-			"parameters":  input.Parameters,
-			"environment": input.Environment,
-			"os_profile":  input.OSProfile,
-		},
+		Inputs:       inputs,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("dispatch test-vm workflow: %w", err)
@@ -80,6 +97,6 @@ func TestVMActivity(ctx workflow.ActivityContext) (any, error) {
 		RunID:      result.RunID,
 		Conclusion: result.Conclusion,
 		RunURL:     result.HTMLURL,
-		Message:    fmt.Sprintf("VM test passed for %s/%s", input.Environment, input.OSProfile),
+		Message:    fmt.Sprintf("test VM passed for %s/%s (template: %s)", input.Lab, input.OSVersion, input.TemplateName),
 	}, nil
 }

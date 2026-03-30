@@ -82,21 +82,25 @@ func GoldenImageBuildWorkflow(ctx *workflow.WorkflowContext) (any, error) {
 		return &output, err
 	}
 	output.StepRunURLs.PackerBuild = packerOutput.RunURL
+	output.TemplateName = packerOutput.TemplateName
 	fmt.Printf("packer build completed: %s\n", packerOutput.Message)
 
-	// Step 4: Test VM (optional)
+	// Step 3: Test VM (optional)
 	if input.TestVM.Enabled {
 		testVMInput := activities.TestVMInput{
-			Owner:        gh.Owner,
-			Repo:         gh.Repo,
-			Ref:          gh.Ref,
-			Token:        gh.Token,
-			WorkflowFile: "test-vm.yaml",
-			VMName:       input.TestVM.VMName,
-			Playbooks:    input.TestVM.AnsiblePlaybooks,
-			Parameters:   input.TestVM.AnsibleParameters,
-			Environment:  input.Environment,
-			OSProfile:    input.OSProfile,
+			Owner:         gh.Owner,
+			Repo:          gh.Repo,
+			Ref:           gh.Ref,
+			Token:         gh.Token,
+			WorkflowFile:  input.TestVM.WorkflowFile,
+			TemplateName:  packerOutput.TemplateName,
+			OSVersion:     input.OSProfile,
+			Lab:           input.Environment,
+			OSFamily:      input.Render.OSFamily,
+			TestPlaybooks: input.TestVM.TestPlaybooks,
+			Overrides:     input.TestVM.Overrides,
+			Runner:        input.TestVM.Runner,
+			DaggerVersion: input.TestVM.DaggerVersion,
 		}
 
 		var testVMOutput activities.TestVMOutput
@@ -109,7 +113,7 @@ func GoldenImageBuildWorkflow(ctx *workflow.WorkflowContext) (any, error) {
 		}
 		output.StepRunURLs.TestVM = testVMOutput.RunURL
 		output.TestResults.Passed = true
-		output.TestResults.VMName = input.TestVM.VMName
+		output.TestResults.VMName = packerOutput.TemplateName
 		fmt.Printf("test VM completed: %s\n", testVMOutput.Message)
 	}
 

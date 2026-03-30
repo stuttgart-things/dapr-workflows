@@ -244,13 +244,40 @@ func (c *Client) GetRunLog(ctx context.Context, owner, repo string, runID int64)
 }
 
 // ExtractFromLog searches the run log for a line matching "key: value" and returns the value.
+// Strips ANSI escape codes and timestamps from the extracted value.
 func ExtractFromLog(log, key string) string {
 	for _, line := range strings.Split(log, "\n") {
 		if idx := strings.Index(line, key+": "); idx != -1 {
-			return strings.TrimSpace(line[idx+len(key)+2:])
+			value := strings.TrimSpace(line[idx+len(key)+2:])
+			return stripANSI(value)
 		}
 	}
 	return ""
+}
+
+// stripANSI removes ANSI escape sequences from a string.
+func stripANSI(s string) string {
+	var result strings.Builder
+	i := 0
+	for i < len(s) {
+		if s[i] == '\x1b' {
+			// Skip ESC[...m sequences
+			i++
+			if i < len(s) && s[i] == '[' {
+				i++
+				for i < len(s) && s[i] != 'm' {
+					i++
+				}
+				if i < len(s) {
+					i++ // skip 'm'
+				}
+			}
+		} else {
+			result.WriteByte(s[i])
+			i++
+		}
+	}
+	return strings.TrimSpace(result.String())
 }
 
 func (c *Client) baseURL() string {

@@ -1,0 +1,148 @@
+---
+name: Dispatch Packer Test-VM (Dagger)
+on:
+  workflow_dispatch:
+    inputs:
+      template-name:
+        description: "VM template name from packer build (e.g., ubuntu24-base-20260328-1713)"
+        required: true
+        type: string
+      os-version:
+        type: choice
+        description: OS version
+        options:
+          - ubuntu24
+          - ubuntu25
+          - rocky9
+      lab:
+        type: choice
+        description: Lab environment
+        options:
+          - labul
+          - labda
+      os-family:
+        type: choice
+        description: OS family (selects template set)
+        options:
+          - ubuntu
+          - rocky
+      test-playbooks:
+        description: "Comma-separated Ansible playbook paths for test validation (optional)"
+        required: false
+        type: string
+      overrides:
+        description: "Optional key=value overrides (e.g., testVmNumCpus=4,testVmMemory=4096)"
+        required: false
+        type: string
+      runner:
+        description: Runner name
+        required: false
+        type: string
+        default: dagger-labul
+      dagger-version:
+        description: Dagger version
+        required: false
+        type: string
+        default: "0.20.0"
+
+permissions:
+  contents: read
+
+env:
+  BUILD_DIR: packer/builds/${{ inputs.os-version }}-${{ inputs.lab }}-vsphere-base-os
+  TEMPLATES_DIR: packer/templates/test-vm
+  ENV_DIR: packer/environments
+  ENV_FILE: ${{ inputs.lab }}-vsphere-v2.yaml
+
+jobs:
+  test-vm:
+    runs-on: ${{ inputs.runner }}
+    environment: k8s
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set VM name
+        run: |
+          VM_NAME="test-${{ inputs.os-version }}-$(date +%Y%m%d-%H%M)"
+          echo "VM_NAME=${VM_NAME}" >> $GITHUB_ENV
+          echo "VM name: ${VM_NAME}"
+
+      - name: Render test-vm terraform config
+        uses: dagger/dagger-for-github@v7
+        with:
+          version: ${{ inputs.dagger-version }}
+          verb: call
+          module: github.com/stuttgart-things/blueprints/vmtemplate
+          args: >-
+            render-build-config
+            --templates-dir ${{ env.TEMPLATES_DIR }}
+            --templates "test-vm.tf.tmpl,state.tf.tmpl"
+            --build-dir ${{ env.BUILD_DIR }}
+            --env-dir ${{ env.ENV_DIR }}
+            --variables-files "${{ env.ENV_FILE }},build-vars.yaml"
+            ${{ inputs.overrides && format('--overrides "{0}"', inputs.overrides) || '' }}
+            export --path /tmp/test-vm-config/
+
+      - name: Create and test VM
+        uses: dagger/dagger-for-github@v7
+        env:
+          VAULT_ROLE_ID: ${{ secrets.VAULT_ROLE_ID }}
+          VAULT_SECRET_ID: ${{ secrets.VAULT_SECRET_ID }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        with:
+          version: ${{ inputs.dagger-version }}
+          verb: call
+          module: github.com/stuttgart-things/blueprints/vm
+          args: >-
+            bake-local
+            --terraform-dir /tmp/test-vm-config
+            --operation apply
+            --variables "vault_addr=${{ secrets.VAULT_ADDR }},vm_name=${{ env.VM_NAME }},vsphere_vm_template=${{ inputs.template-name }}"
+            --vault-role-id env:VAULT_ROLE_ID
+            --vault-secret-id env:VAULT_SECRET_ID
+            --aws-access-key-id env:AWS_ACCESS_KEY_ID
+            --aws-secret-access-key env:AWS_SECRET_ACCESS_KEY
+            ${{ inputs.test-playbooks && format('--ansible-playbooks {0}', inputs.test-playbooks) || '' }}
+            --terraform-max-retries 5
+            --terraform-retry-delay 30
+            --ansible-inventory-type default
+            --ansible-wait-timeout 30
+            export --path /tmp/test-vm-result/
+
+      - name: Destroy test VM
+        if: always()
+        uses: dagger/dagger-for-github@v7
+        env:
+          VAULT_ROLE_ID: ${{ secrets.VAULT_ROLE_ID }}
+          VAULT_SECRET_ID: ${{ secrets.VAULT_SECRET_ID }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        with:
+          version: ${{ inputs.dagger-version }}
+          verb: call
+          module: github.com/stuttgart-things/blueprints/vm
+          args: >-
+            bake-local
+            --terraform-dir /tmp/test-vm-config
+            --operation destroy
+            --variables "vault_addr=${{ secrets.VAULT_ADDR }},vm_name=${{ env.VM_NAME }},vsphere_vm_template=${{ inputs.template-name }}"
+            --vault-role-id env:VAULT_ROLE_ID
+            --vault-secret-id env:VAULT_SECRET_ID
+            --aws-access-key-id env:AWS_ACCESS_KEY_ID
+            --aws-secret-access-key env:AWS_SECRET_ACCESS_KEY
+            --terraform-max-retries 5
+            --terraform-retry-delay 30
+            export --path /tmp/test-vm-destroyed/
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo '## Test VM Results'
+            echo ''
+            echo '- **Template**: ${{ inputs.template-name }}'
+            echo '- **Test VM**: ${{ env.VM_NAME }}'
+            echo '- **Status**: Completed'
+          } >> "$GITHUB_STEP_SUMMARY"

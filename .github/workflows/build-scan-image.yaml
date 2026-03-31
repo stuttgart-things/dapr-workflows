@@ -22,6 +22,7 @@ jobs:
     uses: stuttgart-things/github-workflow-templates/.github/workflows/call-ko-build.yaml@main
     with:
       runs-on: ubuntu-latest
+      go-version: "1.26"
       working-directory: golden-image-workflow
       build-path: .
     secrets: inherit # pragma: allowlist secret

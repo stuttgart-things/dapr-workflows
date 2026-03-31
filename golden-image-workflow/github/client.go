@@ -244,15 +244,23 @@ func (c *Client) GetRunLog(ctx context.Context, owner, repo string, runID int64)
 }
 
 // ExtractFromLog searches the run log for a line matching "key: value" and returns the value.
+// Uses the last match to avoid picking up shell source lines (e.g. echo "Template name: $VAR")
+// that appear before the actual output in GH Actions logs.
 // Strips ANSI escape codes and timestamps from the extracted value.
 func ExtractFromLog(log, key string) string {
+	var lastMatch string
 	for _, line := range strings.Split(log, "\n") {
 		if idx := strings.Index(line, key+": "); idx != -1 {
 			value := strings.TrimSpace(line[idx+len(key)+2:])
-			return stripANSI(value)
+			cleaned := stripANSI(value)
+			// Strip surrounding quotes left over from shell echo statements
+			cleaned = strings.Trim(cleaned, `"'`)
+			if cleaned != "" {
+				lastMatch = cleaned
+			}
 		}
 	}
-	return ""
+	return lastMatch
 }
 
 // stripANSI removes ANSI escape sequences from a string.

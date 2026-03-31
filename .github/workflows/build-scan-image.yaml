@@ -1,0 +1,26 @@
+---
+name: Build, Push & Scan Container Image
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "golden-image-workflow/**"
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "golden-image-workflow/**"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    uses: stuttgart-things/github-workflow-templates/.github/workflows/call-ko-build.yaml@main
+    with:
+      runs-on: ubuntu-latest
+      build-path: ./golden-image-workflow
+    secrets: inherit # pragma: allowlist secret

@@ -6,8 +6,49 @@ includes:
 
 dotenv: ['.env', '{{.HOME}}/.env']
 
+vars:
+  PROJECT: dapr-golden-packer-image-workflow
+  SOURCE_CODE_DIR: ./golden-image-workflow
+  DAGGER_GO_MODULE: github.com/stuttgart-things/dagger/go
+  DAGGER_TRIVY_MODULE: github.com/stuttgart-things/dagger/trivy
+  TARGET_IMAGE_REPO: ghcr.io/stuttgart-things/dapr-golden-packer-image-workflow
+
 tasks:
   default:
     desc: List available tasks
     cmds:
       - task --list
+
+  build-scan-image-ko:
+    desc: Build, push and scan container image with ko
+    cmds:
+      - |
+        RANDOM_TAG=$(openssl rand -hex 6)
+        REPO_NAME="ttl.sh/{{ .PROJECT }}-${RANDOM_TAG}"
+
+        echo "Building and pushing to: ${REPO_NAME}"
+
+        IMAGE_REF=$(dagger call -m {{ .DAGGER_GO_MODULE }} ko-build \
+          --src "{{ .SOURCE_CODE_DIR }}" \
+          --repo "$REPO_NAME" \
+          --push="true" \
+          --progress plain)
+
+        echo "Image pushed: $IMAGE_REF"
+        echo "Scanning with Trivy..."
+
+        dagger call -m {{ .DAGGER_TRIVY_MODULE }} scan-image \
+          --image-ref "$IMAGE_REF" \
+          --severity "HIGH,CRITICAL" \
+          --progress plain \
+          export --path=/tmp/trivy-scan-{{ .PROJECT }}.json
+
+        echo "Build and scan complete!"
+        echo "Image: $IMAGE_REF"
+        echo "Scan Report: /tmp/trivy-scan-{{ .PROJECT }}.json"
+
+        if command -v jq &> /dev/null; then
+          echo ""
+          jq -r '.Results[]? | select(.Vulnerabilities) | "\(.Target): \(.Vulnerabilities | length) vulnerabilities"' \
+            /tmp/trivy-scan-{{ .PROJECT }}.json 2>/dev/null || echo "No HIGH/CRITICAL vulnerabilities found!"
+        fi

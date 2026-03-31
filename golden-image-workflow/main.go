@@ -79,6 +79,7 @@ func main() {
 	// Otherwise, start HTTP server for API triggers
 	mux := http.NewServeMux()
 	mux.HandleFunc("/start", startWorkflowHandler)
+	mux.HandleFunc("/status/", statusWorkflowHandler)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
@@ -159,6 +160,56 @@ func runWorkflowFromFile(ctx context.Context, wfClient *workflow.Client, inputFi
 	}
 
 	return nil
+}
+
+func statusWorkflowHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Extract instance ID from path: /status/{instanceID}
+	instanceID := r.URL.Path[len("/status/"):]
+	if instanceID == "" {
+		http.Error(w, "instance ID required: /status/{instanceID}", http.StatusBadRequest)
+		return
+	}
+
+	wfClient, err := dapr.NewWorkflowClient()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("workflow client error: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	meta, err := wfClient.FetchWorkflowMetadata(r.Context(), instanceID)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("failed to fetch workflow: %v", err), http.StatusNotFound)
+		return
+	}
+
+	response := map[string]any{
+		"instanceID":    meta.InstanceId,
+		"runtimeStatus": meta.RuntimeStatus.String(),
+		"createdAt":     meta.CreatedAt,
+		"lastUpdatedAt": meta.LastUpdatedAt,
+	}
+
+	if meta.Output != nil {
+		var output types.GoldenImageBuildOutput
+		if err := json.Unmarshal([]byte(meta.Output.GetValue()), &output); err == nil {
+			response["output"] = output
+		}
+	}
+
+	if meta.FailureDetails != nil {
+		response["failure"] = map[string]string{
+			"errorType":    meta.FailureDetails.ErrorType,
+			"errorMessage": meta.FailureDetails.ErrorMessage,
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
 }
 
 func startWorkflowHandler(w http.ResponseWriter, r *http.Request) {

@@ -53,6 +53,7 @@ env:
   TEMPLATES_DIR: packer/templates/test-vm
   ENV_DIR: packer/environments
   ENV_FILE: ${{ inputs.lab }}-vsphere-v2.yaml
+  SOPS_SECRETS_FILE: terraform/secrets/${{ inputs.lab }}.tfvars.enc.json
 
 jobs:
   test-vm:
@@ -84,11 +85,15 @@ jobs:
             ${{ inputs.overrides && format('--overrides "{0}"', inputs.overrides) || '' }}
             export --path /tmp/test-vm-config/
 
+      - name: Copy SOPS secrets to terraform dir
+        run: |
+          cp "${{ env.SOPS_SECRETS_FILE }}" /tmp/test-vm-config/terraform.tfvars.enc.json
+          echo "Copied SOPS secrets for ${{ inputs.lab }}"
+
       - name: Create and test VM
         uses: dagger/dagger-for-github@v7
         env:
-          VAULT_ROLE_ID: ${{ secrets.VAULT_ROLE_ID }}
-          VAULT_SECRET_ID: ${{ secrets.VAULT_SECRET_ID }}
+          SOPS_AGE_KEY: ${{ secrets.SOPS_AGE_KEY }}
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         with:
@@ -99,9 +104,9 @@ jobs:
             bake-local
             --terraform-dir /tmp/test-vm-config
             --operation apply
-            --variables "vault_addr=${{ secrets.VAULT_ADDR }},vm_name=${{ env.VM_NAME }},vsphere_vm_template=${{ inputs.template-name }}"
-            --vault-role-id env:VAULT_ROLE_ID
-            --vault-secret-id env:VAULT_SECRET_ID
+            --variables "vm_name=${{ env.VM_NAME }},vsphere_vm_template=${{ inputs.template-name }}"
+            --encrypted-file /tmp/test-vm-config/terraform.tfvars.enc.json
+            --sops-key env:SOPS_AGE_KEY
             --aws-access-key-id env:AWS_ACCESS_KEY_ID
             --aws-secret-access-key env:AWS_SECRET_ACCESS_KEY
             ${{ inputs.test-playbooks && format('--ansible-playbooks {0}', inputs.test-playbooks) || '' }}
@@ -115,8 +120,7 @@ jobs:
         if: always()
         uses: dagger/dagger-for-github@v7
         env:
-          VAULT_ROLE_ID: ${{ secrets.VAULT_ROLE_ID }}
-          VAULT_SECRET_ID: ${{ secrets.VAULT_SECRET_ID }}
+          SOPS_AGE_KEY: ${{ secrets.SOPS_AGE_KEY }}
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         with:
@@ -127,9 +131,9 @@ jobs:
             bake-local
             --terraform-dir /tmp/test-vm-config
             --operation destroy
-            --variables "vault_addr=${{ secrets.VAULT_ADDR }},vm_name=${{ env.VM_NAME }},vsphere_vm_template=${{ inputs.template-name }}"
-            --vault-role-id env:VAULT_ROLE_ID
-            --vault-secret-id env:VAULT_SECRET_ID
+            --variables "vm_name=${{ env.VM_NAME }},vsphere_vm_template=${{ inputs.template-name }}"
+            --encrypted-file /tmp/test-vm-config/terraform.tfvars.enc.json
+            --sops-key env:SOPS_AGE_KEY
             --aws-access-key-id env:AWS_ACCESS_KEY_ID
             --aws-secret-access-key env:AWS_SECRET_ACCESS_KEY
             --terraform-max-retries 5

@@ -53,6 +53,32 @@ tasks:
             /tmp/trivy-scan-{{ .PROJECT }}.json 2>/dev/null || echo "No HIGH/CRITICAL vulnerabilities found!"
         fi
 
+  build:
+    desc: Interactively choose a workflow and build its container image (requires gum)
+    cmds:
+      - |
+        if ! command -v gum &> /dev/null; then
+          echo "gum not found — install from https://github.com/charmbracelet/gum"
+          exit 1
+        fi
+
+        TARGET=$(gum choose --header="Select workflow to build:" \
+          "golden-image-workflow" \
+          "backstage-template-execution")
+
+        case "$TARGET" in
+          golden-image-workflow)
+            task build-golden-image-workflow
+            ;;
+          backstage-template-execution)
+            task build-backstage-template-execution
+            ;;
+          *)
+            echo "no selection"
+            exit 1
+            ;;
+        esac
+
   build-golden-image-workflow:
     desc: Build and scan golden-image-workflow container image
     cmds:

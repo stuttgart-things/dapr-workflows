@@ -7,11 +7,9 @@ includes:
 dotenv: ['.env', '{{.HOME}}/.env']
 
 vars:
-  PROJECT: dapr-golden-packer-image-workflow
-  SOURCE_CODE_DIR: ./golden-image-workflow
-  DAGGER_GO_MODULE: github.com/stuttgart-things/dagger/go
-  DAGGER_TRIVY_MODULE: github.com/stuttgart-things/dagger/trivy
-  TARGET_IMAGE_REPO: ghcr.io/stuttgart-things/dapr-golden-packer-image-workflow
+  DAGGER_GO_MODULE: github.com/stuttgart-things/dagger/go@v0.91.0
+  DAGGER_TRIVY_MODULE: github.com/stuttgart-things/dagger/trivy@v0.91.0
+  KO_VERSION: 1c688bd6325d7b041fdc7d1be092f96054c35d39
 
 tasks:
   default:
@@ -20,7 +18,11 @@ tasks:
       - task --list
 
   build-scan-image-ko:
-    desc: Build, push and scan container image with ko
+    desc: Build, push to ttl.sh and scan a workflow container image with ko (requires SOURCE_CODE_DIR)
+    requires:
+      vars: [SOURCE_CODE_DIR]
+    vars:
+      PROJECT: 'dapr-{{ base .SOURCE_CODE_DIR }}'
     cmds:
       - |
         RANDOM_TAG=$(openssl rand -hex 6)
@@ -32,6 +34,7 @@ tasks:
           --src "{{ .SOURCE_CODE_DIR }}" \
           --repo "$REPO_NAME" \
           --push="true" \
+          --ko-version="{{ .KO_VERSION }}" \
           --progress plain)
 
         echo "Image pushed: $IMAGE_REF"
@@ -47,8 +50,80 @@ tasks:
         echo "Image: $IMAGE_REF"
         echo "Scan Report: /tmp/trivy-scan-{{ .PROJECT }}.json"
 
+        # Filter the summary through an optional .trivyignore in the workflow dir.
+        # Format: one CVE id per line, '#' comments allowed.
+        IGNORE_FILE="{{ .SOURCE_CODE_DIR }}/.trivyignore"
+        IGNORED=""
+        if [ -f "$IGNORE_FILE" ]; then
+          IGNORED=$(grep -Ev '^\s*(#|$)' "$IGNORE_FILE" | tr '\n' ' ')
+          echo "Ignoring CVEs from $IGNORE_FILE: ${IGNORED:-<none>}"
+        fi
+
         if command -v jq &> /dev/null; then
           echo ""
-          jq -r '.Results[]? | select(.Vulnerabilities) | "\(.Target): \(.Vulnerabilities | length) vulnerabilities"' \
-            /tmp/trivy-scan-{{ .PROJECT }}.json 2>/dev/null || echo "No HIGH/CRITICAL vulnerabilities found!"
+          IGNORED="$IGNORED" jq -r '
+            ($ENV.IGNORED | split(" ") | map(select(length > 0))) as $ignored |
+            .Results[]?
+            | .Target as $t
+            | (.Vulnerabilities // [] | map(select(.VulnerabilityID as $id | ($ignored | index($id)) | not))) as $vulns
+            | "\($t): \($vulns | length) vulnerabilities"
+          ' /tmp/trivy-scan-{{ .PROJECT }}.json 2>/dev/null \
+            || echo "No HIGH/CRITICAL vulnerabilities found!"
         fi
+
+        # Interactive ignore: if gum is present and there are non-ignored vulns,
+        # let the user multi-select CVEs to add to .trivyignore.
+        if command -v gum &> /dev/null && command -v jq &> /dev/null; then
+          ROWS=$(IGNORED="$IGNORED" jq -r '
+            ($ENV.IGNORED | split(" ") | map(select(length > 0))) as $ignored |
+            .Results[]?
+            | .Vulnerabilities // []
+            | map(select(.VulnerabilityID as $id | ($ignored | index($id)) | not))
+            | .[]
+            | "\(.VulnerabilityID)\t\(.Severity)\t\(.PkgName)\t\(.Title // "")"
+          ' /tmp/trivy-scan-{{ .PROJECT }}.json 2>/dev/null)
+
+          if [ -n "$ROWS" ]; then
+            echo ""
+            SELECTED=$(echo "$ROWS" | awk -F'\t' '{printf "%s  [%s]  %s — %s\n", $1, $2, $3, $4}' \
+              | gum choose --no-limit --header="Select CVEs to add to .trivyignore (space to toggle, enter to confirm, esc to skip):" \
+              || true)
+
+            if [ -n "$SELECTED" ]; then
+              mkdir -p "{{ .SOURCE_CODE_DIR }}"
+              echo "$SELECTED" | awk '{print $1}' >> "$IGNORE_FILE"
+              # dedupe + preserve existing comments
+              TMP=$(mktemp)
+              awk '!seen[$0]++' "$IGNORE_FILE" > "$TMP" && mv "$TMP" "$IGNORE_FILE"
+              echo ""
+              echo "Updated $IGNORE_FILE:"
+              cat "$IGNORE_FILE"
+            fi
+          fi
+        fi
+
+  build:
+    desc: Interactively choose a workflow and build its container image (requires gum)
+    cmds:
+      - |
+        if ! command -v gum &> /dev/null; then
+          echo "gum not found — install from https://github.com/charmbracelet/gum"
+          exit 1
+        fi
+
+        # discover workflow folders (any top-level dir containing a go.mod)
+        mapfile -t DIRS < <(find . -mindepth 2 -maxdepth 2 -name go.mod -printf '%h\n' \
+          | sed 's|^\./||' | sort -u)
+
+        if [ ${#DIRS[@]} -eq 0 ]; then
+          echo "no workflow folders with a go.mod found"
+          exit 1
+        fi
+
+        TARGET=$(printf '%s\n' "${DIRS[@]}" | gum choose --header="Select workflow to build:")
+        if [ -z "$TARGET" ]; then
+          echo "no selection"
+          exit 1
+        fi
+
+        task build-scan-image-ko SOURCE_CODE_DIR="./$TARGET"

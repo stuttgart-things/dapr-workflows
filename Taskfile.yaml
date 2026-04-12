@@ -7,11 +7,8 @@ includes:
 dotenv: ['.env', '{{.HOME}}/.env']
 
 vars:
-  PROJECT: dapr-golden-packer-image-workflow
-  SOURCE_CODE_DIR: ./golden-image-workflow
   DAGGER_GO_MODULE: github.com/stuttgart-things/dagger/go
   DAGGER_TRIVY_MODULE: github.com/stuttgart-things/dagger/trivy
-  TARGET_IMAGE_REPO: ghcr.io/stuttgart-things/dapr-golden-packer-image-workflow
 
 tasks:
   default:
@@ -20,7 +17,10 @@ tasks:
       - task --list
 
   build-scan-image-ko:
-    desc: Build, push and scan container image with ko
+    desc: Build, push to ttl.sh and scan a workflow container image with ko
+    internal: true
+    requires:
+      vars: [PROJECT, SOURCE_CODE_DIR]
     cmds:
       - |
         RANDOM_TAG=$(openssl rand -hex 6)
@@ -52,3 +52,19 @@ tasks:
           jq -r '.Results[]? | select(.Vulnerabilities) | "\(.Target): \(.Vulnerabilities | length) vulnerabilities"' \
             /tmp/trivy-scan-{{ .PROJECT }}.json 2>/dev/null || echo "No HIGH/CRITICAL vulnerabilities found!"
         fi
+
+  build-golden-image-workflow:
+    desc: Build and scan golden-image-workflow container image
+    cmds:
+      - task: build-scan-image-ko
+        vars:
+          PROJECT: dapr-golden-packer-image-workflow
+          SOURCE_CODE_DIR: ./golden-image-workflow
+
+  build-backstage-template-execution:
+    desc: Build and scan backstage-template-execution container image
+    cmds:
+      - task: build-scan-image-ko
+        vars:
+          PROJECT: dapr-backstage-template-execution
+          SOURCE_CODE_DIR: ./backstage-template-execution

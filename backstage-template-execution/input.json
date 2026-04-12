@@ -1,0 +1,64 @@
+{
+  "backstageURL": "http://localhost:7007",
+  "templateRef": "template:default/create-terraform-vm",
+  "authToken": "$DAPR_SERVICE_TOKEN",
+  "dryRun": false,
+  "values": {
+    "lab": "LabUL",
+    "cloud": "proxmox",
+    "vm_count": "1",
+    "vm_name": "dapr-test-03",
+    "vm_sizing": "small",
+    "vm_num_cpus": "2",
+    "vm_memory": "4096",
+    "vm_disk_size": "64",
+    "module_source": "github.com/stuttgart-things/proxmox-vm?ref=3.0.2-rc08-20260407",
+    "vm_template": "ubuntu24",
+    "vm_firmware": "seabios",
+    "pve_folder_path": "stuttgart-things",
+    "pve_api_url": "https://ul-pve01.labul.sva.de:8006/api2/json",
+    "pve_cluster_node": "ul-pve01",
+    "pve_datastore": "V5010-01-1",
+    "pve_network": "vmbr0",
+    "vault_secret": "proxmox-labul",
+    "secrets_mode": "sops",
+    "s3_endpoint": "https://artifacts.demo-infra.sthings-vsphere.labul.sva.de",
+    "s3_bucket": "state",
+    "s3_region": "main",
+    "provisioning_profile": "baseos",
+    "baseos_manage_filesystem": true,
+    "baseos_update_packages": true,
+    "baseos_install_requirements": true,
+    "baseos_install_motd": true,
+    "baseos_username": "sthings",
+    "baseos_lvm_home_sizing": "15%",
+    "baseos_lvm_root_sizing": "35%",
+    "baseos_lvm_var_sizing": "50%",
+    "ansible_collections": [
+      "community.crypto:3.0.3",
+      "community.general:11.2.1",
+      "ansible.posix:2.1.0",
+      "kubernetes.core:6.2.0",
+      "community.docker:4.7.0",
+      "awx.awx:24.6.1",
+      "community.hashi_vault:7.0.0",
+      "ansible.netcommon:8.2.0"
+    ],
+    "sthings_collections": [
+      "https://github.com/stuttgart-things/ansible/releases/download/sthings-baseos-26.6.1048.tar.gz/sthings-baseos-26.6.1048.tar.gz"
+    ],
+    "custom_collections": [],
+    "export_and_encrypt": false
+  },
+  "watch": {
+    "owner": "stuttgart-things",
+    "repo": "stuttgart-things",
+    "workflowFile": "pr-vm-deploy.yaml",
+    "branch": "proxmox-vm-dapr-test-03-labul",
+    "timeoutMin": 30,
+    "merge": {
+      "enabled": true,
+      "method": "squash"
+    }
+  }
+}

@@ -71,6 +71,37 @@ tasks:
             || echo "No HIGH/CRITICAL vulnerabilities found!"
         fi
 
+        # Interactive ignore: if gum is present and there are non-ignored vulns,
+        # let the user multi-select CVEs to add to .trivyignore.
+        if command -v gum &> /dev/null && command -v jq &> /dev/null; then
+          ROWS=$(IGNORED="$IGNORED" jq -r '
+            ($ENV.IGNORED | split(" ") | map(select(length > 0))) as $ignored |
+            .Results[]?
+            | .Vulnerabilities // []
+            | map(select(.VulnerabilityID as $id | ($ignored | index($id)) | not))
+            | .[]
+            | "\(.VulnerabilityID)\t\(.Severity)\t\(.PkgName)\t\(.Title // "")"
+          ' /tmp/trivy-scan-{{ .PROJECT }}.json 2>/dev/null)
+
+          if [ -n "$ROWS" ]; then
+            echo ""
+            SELECTED=$(echo "$ROWS" | awk -F'\t' '{printf "%s  [%s]  %s — %s\n", $1, $2, $3, $4}' \
+              | gum choose --no-limit --header="Select CVEs to add to .trivyignore (space to toggle, enter to confirm, esc to skip):" \
+              || true)
+
+            if [ -n "$SELECTED" ]; then
+              mkdir -p "{{ .SOURCE_CODE_DIR }}"
+              echo "$SELECTED" | awk '{print $1}' >> "$IGNORE_FILE"
+              # dedupe + preserve existing comments
+              TMP=$(mktemp)
+              awk '!seen[$0]++' "$IGNORE_FILE" > "$TMP" && mv "$TMP" "$IGNORE_FILE"
+              echo ""
+              echo "Updated $IGNORE_FILE:"
+              cat "$IGNORE_FILE"
+            fi
+          fi
+        fi
+
   build:
     desc: Interactively choose a workflow and build its container image (requires gum)
     cmds:

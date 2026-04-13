@@ -1,13 +1,12 @@
 {
-  "backstageURL": "http://localhost:7007",
+  "backstageURL": "https://backstage.platform.sthings-vsphere.labul.sva.de",
   "templateRef": "template:default/create-terraform-vm",
-  "authToken": "$DAPR_SERVICE_TOKEN",
   "dryRun": false,
   "values": {
     "lab": "LabUL",
     "cloud": "proxmox",
     "vm_count": "1",
-    "vm_name": "dapr-test-03",
+    "vm_name": "dapr-monday-1",
     "vm_sizing": "small",
     "vm_num_cpus": "2",
     "vm_memory": "4096",
@@ -54,7 +53,7 @@
     "owner": "stuttgart-things",
     "repo": "stuttgart-things",
     "workflowFile": "pr-vm-deploy.yaml",
-    "branch": "proxmox-vm-dapr-test-03-labul",
+    "branch": "proxmox-vm-dapr-monday-1-labul",
     "timeoutMin": 30,
     "merge": {
       "enabled": true,

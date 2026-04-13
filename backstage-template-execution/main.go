@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,9 +15,18 @@ import (
 	"strings"
 	"time"
 
-	dapr "github.com/dapr/go-sdk/client"
 	"github.com/dapr/durabletask-go/workflow"
+	dapr "github.com/dapr/go-sdk/client"
 )
+
+var backstageClient = func() *http.Client {
+	if os.Getenv("BACKSTAGE_INSECURE_TLS") == "true" {
+		return &http.Client{Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		}}
+	}
+	return http.DefaultClient
+}()
 
 // ─────────────────────────────────────────────────────────────────────────────
 // INPUT
@@ -196,6 +206,9 @@ func CallScaffolder(ctx workflow.ActivityContext) (any, error) {
 	if err := ctx.GetInput(&in); err != nil {
 		return nil, fmt.Errorf("get input: %w", err)
 	}
+	if in.AuthToken == "" {
+		in.AuthToken = os.Getenv("BACKSTAGE_AUTH_TOKEN")
+	}
 
 	url := in.BackstageURL + "/api/scaffolder/v2/tasks"
 	payload := map[string]interface{}{
@@ -228,7 +241,7 @@ func CallScaffolder(ctx workflow.ActivityContext) (any, error) {
 		req.Header.Set("Authorization", "Bearer "+in.AuthToken)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := backstageClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("POST %s: %w", url, err)
 	}
@@ -287,7 +300,7 @@ func fetchTemplateEntity(baseURL, ref, token string) (map[string]interface{}, er
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := backstageClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -319,6 +332,9 @@ func PollTask(ctx workflow.ActivityContext) (any, error) {
 	if err := ctx.GetInput(&in); err != nil {
 		return nil, fmt.Errorf("get input: %w", err)
 	}
+	if in.AuthToken == "" {
+		in.AuthToken = os.Getenv("BACKSTAGE_AUTH_TOKEN")
+	}
 
 	req, _ := http.NewRequest(http.MethodGet,
 		fmt.Sprintf("%s/api/scaffolder/v2/tasks/%s", in.BackstageURL, in.TaskID), nil)
@@ -326,7 +342,7 @@ func PollTask(ctx workflow.ActivityContext) (any, error) {
 		req.Header.Set("Authorization", "Bearer "+in.AuthToken)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := backstageClient.Do(req)
 	if err != nil {
 		return nil, err
 	}

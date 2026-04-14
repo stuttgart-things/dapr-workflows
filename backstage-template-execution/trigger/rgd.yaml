@@ -1,0 +1,91 @@
+---
+# BackstageTemplateRun — a kro ResourceGraphDefinition that bundles the
+# ConfigMap (input.json) and the trigger Job (curl → dapr sidecar) for
+# starting a BackstageTemplateWorkflow run. One small CR replaces ~60
+# lines of CM+Job boilerplate.
+#
+# Apply order:
+#   1. install kro (flux/infra/kro)
+#   2. kubectl apply -f rgd.yaml                  # installs the CRD
+#   3. kubectl apply -f examples/<your-run>.yaml  # triggers a run
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: backstage-template-run
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: BackstageTemplateRun
+    spec:
+      # Workflow addressing
+      workflowName: string | default="BackstageTemplateWorkflow" description="Dapr workflow name registered by the worker"
+      sidecarService: string | default="backstage-template-execution-dapr.backstage-workflows.svc.cluster.local" description="In-cluster DNS name of the daprd sidecar service"
+      sidecarPort: integer | default=3500 description="Dapr HTTP port on the sidecar service"
+      triggerImage: string | default="curlimages/curl:8.11.1" description="Image used by the trigger Job"
+
+      # Workflow input — shape is the same as dapr-workflows/backstage-template-execution/input.json
+      backstageURL: string | required=true description="Base URL of the Backstage instance"
+      templateRef: string | required=true description="Backstage template entity ref, e.g. template:default/create-terraform-vm"
+      dryRun: boolean | default=true description="If true the worker stops before any mutating step"
+      values: object | required=true description="Template values — free-form, shape depends on the Backstage template"
+      watch: object | required=true description="GitHub Actions watch config (owner/repo/workflowFile/branch/timeoutMin/merge)"
+
+    status:
+      jobName: ${trigger.metadata.name}
+      succeeded: ${trigger.status.succeeded}
+      failed: ${trigger.status.failed}
+
+  resources:
+    # ConfigMap with the serialized workflow input. json.marshal turns the
+    # free-form `values` / `watch` maps into a single string that the Job
+    # can POST verbatim to the dapr sidecar (no envsubst, no escaping).
+    - id: input
+      template:
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: ${schema.metadata.name}-input
+        data:
+          input.json: |
+            ${json.marshal({"backstageURL": schema.spec.backstageURL, "templateRef": schema.spec.templateRef, "dryRun": schema.spec.dryRun, "values": schema.spec.values, "watch": schema.spec.watch})}
+
+    # Trigger Job — mounts the ConfigMap and POSTs it to the dapr sidecar.
+    # TTL auto-cleans the Job 5 min after completion; delete the
+    # BackstageTemplateRun CR to tear both CM + Job down immediately.
+    - id: trigger
+      template:
+        apiVersion: batch/v1
+        kind: Job
+        metadata:
+          name: ${schema.metadata.name}
+        spec:
+          ttlSecondsAfterFinished: 300
+          backoffLimit: 0
+          template:
+            spec:
+              restartPolicy: Never
+              volumes:
+                - name: input
+                  configMap:
+                    name: ${input.metadata.name}
+              containers:
+                - name: trigger
+                  image: ${schema.spec.triggerImage}
+                  volumeMounts:
+                    - name: input
+                      mountPath: /input
+                      readOnly: true
+                  command:
+                    - sh
+                    - -c
+                    - |
+                      set -eu
+                      INSTANCE_ID="${schema.metadata.name}-$(date +%s)"
+                      SIDECAR="http://${schema.spec.sidecarService}:${string(schema.spec.sidecarPort)}"
+                      echo "starting workflow instance: $INSTANCE_ID"
+                      curl -fsS -X POST \
+                        "$SIDECAR/v1.0-beta1/workflows/dapr/${schema.spec.workflowName}/start?instanceID=$INSTANCE_ID" \
+                        -H "Content-Type: application/json" \
+                        --data-binary @/input/input.json
+                      echo
+                      echo "instance started: $INSTANCE_ID"

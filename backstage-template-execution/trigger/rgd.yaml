@@ -20,7 +20,7 @@ spec:
       # Workflow addressing
       workflowName: string | default="BackstageTemplateWorkflow" description="Dapr workflow name registered by the worker"
       sidecarService: string | default="backstage-template-execution-dapr.backstage-workflows.svc.cluster.local" description="In-cluster DNS name of the daprd sidecar service"
-      sidecarPort: integer | default=3500 description="Dapr HTTP port on the sidecar service"
+      sidecarPort: integer | default=3500 description="Dapr HTTP port. The <app-id>-dapr svc is headless so DNS resolves to the pod IP; connect on the sidecar's actual listen port (3500)."
       triggerImage: string | default="curlimages/curl:8.11.1" description="Image used by the trigger Job"
 
       # Workflow input — shape is the same as dapr-workflows/backstage-template-execution/input.json

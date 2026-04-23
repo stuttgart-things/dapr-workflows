@@ -219,6 +219,9 @@ The Dapr workflow dispatches these GH Actions workflows in the target repo. Exam
 | `dispatch-render-packer-config.yaml` | Render packer config, commit to branch, create PR | Already exists in stuttgart-things |
 | `dispatch-packer-build-dagger.yaml` | Run Packer build via Dagger | [examples/dispatch-packer-build-dagger.yaml](examples/dispatch-packer-build-dagger.yaml) |
 | `dispatch-packer-testvm-dagger.yaml` | Create test VM and validate | Already exists in stuttgart-things |
+| `dispatch-packer-movetemplate.yaml` | Rename built template → delete any pre-existing golden → move into the golden folder | Already exists in stuttgart-things |
+
+`PromoteActivity` dispatches `dispatch-packer-movetemplate.yaml` with `template-name`, `target-name`, `lab` (required — selects the vSphere build/golden folders), and optionally `build-folder`/`golden-folder`/`runner`. The `lab` input is threaded through from `input.Environment` in both `VsphereTemplateWorkflow` and `GoldenImageBuildWorkflow`; the GH workflow's `Resolve vSphere folders` step exits 1 if it's missing.
 
 ## Project Structure
 

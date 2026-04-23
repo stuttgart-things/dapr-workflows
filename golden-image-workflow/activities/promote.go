@@ -17,6 +17,7 @@ type PromoteInput struct {
 	WorkflowFile string `json:"workflowFile"`
 	TemplateName string `json:"templateName"` // source template from packer build
 	TargetName   string `json:"targetName"`   // golden image name
+	Lab          string `json:"lab"`          // labul | labda — selects vSphere defaults
 	BuildFolder  string `json:"buildFolder"`  // vSphere packer build folder
 	GoldenFolder string `json:"goldenFolder"` // vSphere golden image folder
 	Runner       string `json:"runner"`
@@ -44,6 +45,9 @@ func PromoteActivity(ctx workflow.ActivityContext) (any, error) {
 		"target-name":   input.TargetName,
 	}
 
+	if input.Lab != "" {
+		inputs["lab"] = input.Lab
+	}
 	if input.BuildFolder != "" {
 		inputs["build-folder"] = input.BuildFolder
 	}

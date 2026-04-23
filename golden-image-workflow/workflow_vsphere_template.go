@@ -104,6 +104,7 @@ func VsphereTemplateWorkflow(ctx *workflow.WorkflowContext) (any, error) {
 		WorkflowFile: input.Promotion.WorkflowFile,
 		TemplateName: templateName,
 		TargetName:   input.Promotion.TargetName,
+		Lab:          input.Environment,
 		BuildFolder:  input.Promotion.BuildFolder,
 		GoldenFolder: input.Promotion.GoldenFolder,
 		Runner:       input.Promotion.Runner,

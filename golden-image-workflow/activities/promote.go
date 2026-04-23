@@ -54,21 +54,15 @@ func PromoteActivity(ctx workflow.ActivityContext) (any, error) {
 		inputs["runner"] = input.Runner
 	}
 
-	dispatchTime := time.Now()
-	err := client.DispatchWorkflow(bgCtx, gh.DispatchWorkflowInput{
+	runID, err := client.DispatchAndFindRun(bgCtx, gh.DispatchWorkflowInput{
 		Owner:        input.Owner,
 		Repo:         input.Repo,
 		WorkflowFile: input.WorkflowFile,
 		Ref:          input.Ref,
 		Inputs:       inputs,
-	})
+	}, 2*time.Minute)
 	if err != nil {
 		return nil, fmt.Errorf("dispatch promote workflow: %w", err)
-	}
-
-	runID, err := client.FindRunByDispatch(bgCtx, input.Owner, input.Repo, input.WorkflowFile, dispatchTime, 10*time.Second, 2*time.Minute)
-	if err != nil {
-		return nil, fmt.Errorf("find promote run: %w", err)
 	}
 
 	result, err := client.WaitForCompletion(bgCtx, input.Owner, input.Repo, runID, 15*time.Second, 15*time.Minute)

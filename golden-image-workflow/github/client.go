@@ -44,7 +44,16 @@ type RunResult struct {
 	LogsURL    string `json:"logsUrl"`
 }
 
-// DispatchWorkflow triggers a workflow_dispatch event.
+// DispatchWorkflow triggers a workflow_dispatch event. Retries transient
+// 5xx and network errors up to 3 times with exponential backoff; 4xx
+// responses are returned immediately as they indicate a client error
+// (wrong ref, missing inputs, insufficient permissions).
+//
+// Note: GitHub's dispatch endpoint is not strictly transactional. A 5xx
+// response does not guarantee the run was not queued. Callers should
+// follow a failed dispatch with FindRunByDispatch using the pre-dispatch
+// timestamp to adopt any run GH may have created despite the error —
+// see DispatchAndFindRun for the combined flow.
 func (c *Client) DispatchWorkflow(ctx context.Context, input DispatchWorkflowInput) error {
 	url := fmt.Sprintf("%s/repos/%s/%s/actions/workflows/%s/dispatches",
 		c.baseURL(), input.Owner, input.Repo, input.WorkflowFile)
@@ -59,24 +68,100 @@ func (c *Client) DispatchWorkflow(ctx context.Context, input DispatchWorkflowInp
 		return fmt.Errorf("marshal dispatch body: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(string(bodyJSON)))
-	if err != nil {
-		return fmt.Errorf("create dispatch request: %w", err)
-	}
-	c.setHeaders(req)
+	const maxAttempts = 3
+	backoff := 5 * time.Second
+	var lastErr error
 
-	resp, err := c.HTTP.Do(req)
-	if err != nil {
-		return fmt.Errorf("dispatch request failed: %w", err)
-	}
-	defer resp.Body.Close()
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(string(bodyJSON)))
+		if err != nil {
+			return fmt.Errorf("create dispatch request: %w", err)
+		}
+		c.setHeaders(req)
 
-	if resp.StatusCode != http.StatusNoContent {
+		resp, err := c.HTTP.Do(req)
+		if err != nil {
+			// Network-level error; retry.
+			lastErr = fmt.Errorf("dispatch request failed (attempt %d/%d): %w", attempt, maxAttempts, err)
+			if attempt < maxAttempts {
+				if err := sleepCtx(ctx, backoff); err != nil {
+					return err
+				}
+				backoff *= 2
+				continue
+			}
+			return lastErr
+		}
+
+		if resp.StatusCode == http.StatusNoContent {
+			resp.Body.Close()
+			return nil
+		}
+
 		respBody, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		// Only retry server errors; client errors (4xx) won't resolve on retry.
+		if resp.StatusCode >= 500 && resp.StatusCode < 600 && attempt < maxAttempts {
+			lastErr = fmt.Errorf("dispatch returned %d (attempt %d/%d): %s", resp.StatusCode, attempt, maxAttempts, string(respBody))
+			if err := sleepCtx(ctx, backoff); err != nil {
+				return err
+			}
+			backoff *= 2
+			continue
+		}
+
 		return fmt.Errorf("dispatch returned %d: %s", resp.StatusCode, string(respBody))
 	}
 
-	return nil
+	return lastErr
+}
+
+// DispatchAndFindRun dispatches a workflow and returns the resulting run ID.
+// On dispatch error (including 5xx after retries), it still attempts to
+// find a run that GH may have created despite the error response — this
+// recovers from GH's non-transactional dispatch behaviour that caused
+// silent orphan runs in the past.
+//
+// Returns the run ID on success, or an error if no run could be found
+// within findTimeout after the dispatch attempt started.
+func (c *Client) DispatchAndFindRun(ctx context.Context, input DispatchWorkflowInput, findTimeout time.Duration) (int64, error) {
+	dispatchTime := time.Now()
+	dispatchErr := c.DispatchWorkflow(ctx, input)
+
+	// Whether dispatch succeeded or failed, look for a run: GH sometimes
+	// creates the run even when the dispatch response is 5xx.
+	findPoll := 5 * time.Second
+	if dispatchErr != nil {
+		// If dispatch failed, give GH a bit more time in case it queued late.
+		findPoll = 10 * time.Second
+	}
+
+	runID, findErr := c.FindRunByDispatch(ctx, input.Owner, input.Repo, input.WorkflowFile, dispatchTime, findPoll, findTimeout)
+	if findErr == nil {
+		if dispatchErr != nil {
+			// Dispatch errored but a run exists — log and adopt.
+			fmt.Printf("adopted run %d despite dispatch error: %v\n", runID, dispatchErr)
+		}
+		return runID, nil
+	}
+
+	// No run found. Surface the original dispatch error if there was one,
+	// otherwise the find error.
+	if dispatchErr != nil {
+		return 0, fmt.Errorf("dispatch failed and no run was created: %w", dispatchErr)
+	}
+	return 0, findErr
+}
+
+// sleepCtx sleeps for d, but returns early if ctx is cancelled.
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(d):
+		return nil
+	}
 }
 
 // workflowRun represents the relevant fields from the GH API runs response.

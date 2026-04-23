@@ -47,11 +47,72 @@ dapr run --app-id golden-image -- ./golden-image-workflow --run --input examples
 
 | File | Description |
 |------|-------------|
-| `examples/inputs/ubuntu24-labul.json` | Ubuntu 24 on labul |
-| `examples/inputs/ubuntu24-labda.json` | Ubuntu 24 on labda |
-| `examples/inputs/rocky9-labul.json` | Rocky 9 on labul |
+| `examples/inputs/ubuntu24-labul.json` | Ubuntu 24 on labul (full pipeline) |
+| `examples/inputs/ubuntu24-labda.json` | Ubuntu 24 on labda (full pipeline) |
+| `examples/inputs/rocky9-labul.json` | Rocky 9 on labul (full pipeline) |
+| `examples/inputs/vsphere-ubuntu26-labda.json` | Ubuntu 26 on labda (build + promote only) |
+| `examples/inputs/vsphere-rocky9-labul.json` | Rocky 9 on labul (build + promote only) |
+| `examples/inputs/vsphere-ubuntu26-labda-resume.json` | Resume mode: skip build, promote an existing template |
 
 The GitHub token is read from the `GITHUB_TOKEN` environment variable (not stored in JSON).
+
+### Workflows
+
+Two workflows are registered:
+
+| Name | Steps | Use when |
+|------|-------|----------|
+| `GoldenImageBuildWorkflow` (default) | render → build → (test) → (promote) → (notify) | You want the full pipeline from source rendering through notification |
+| `VsphereTemplateWorkflow` | build → promote | Packer config is already committed; you just want to build and promote to golden |
+
+Select the lean workflow with `--workflow`:
+
+```bash
+dapr run --app-id golden-image -- ./golden-image-workflow \
+  --run --workflow VsphereTemplateWorkflow \
+  --input examples/inputs/vsphere-ubuntu26-labda.json
+```
+
+`VsphereTemplateWorkflow` exposes the HTTP endpoint `/start-vsphere-template`:
+
+```bash
+curl -X POST http://localhost:8080/start-vsphere-template \
+  -H "Content-Type: application/json" \
+  -d @examples/inputs/vsphere-ubuntu26-labda.json
+```
+
+#### Template name handoff
+
+The input JSON only carries the **target** golden image name (`promotion.targetName`, e.g. `sthings-u26`). The **source** template name — Packer's timestamped build artifact like `ubuntu26-base-20260423-1124` — doesn't exist yet at dispatch time. It flows between jobs at runtime:
+
+1. The Packer build GH Actions workflow constructs the name (`<os>-<provisioning>-<YYYYMMDD-hhmm>`) and echoes `Template name: <value>` to the run log.
+2. `PackerBuildActivity` fetches the run log after completion and extracts the value via `ExtractFromLog` (last match wins, to skip the shell-source line).
+3. Dapr persists it as workflow state — if the worker crashes between build and promote, the resumed worker still has the name.
+4. `PromoteActivity` passes it as the `template-name` input to `dispatch-packer-movetemplate.yaml`, which uses it as the rename source.
+
+The workflow fails fast with `FailedStep: "PackerBuild"` if extraction returns empty, so a malformed log can't silently cascade into a broken rename.
+
+#### Resilience: retries, adoption, and manual resume
+
+Three safety nets prevent lost work when something goes wrong between "dispatch the build" and "promote the result":
+
+1. **Dispatch retry.** `DispatchWorkflow` retries transient network errors and HTTP 5xx responses up to 3 times with exponential backoff (5s → 10s → 20s). 4xx responses (bad ref, missing inputs) are returned immediately — they won't resolve on retry.
+
+2. **Dispatch adoption.** GitHub's dispatch endpoint is not strictly transactional — a 5xx response can still mean the run was queued. `DispatchAndFindRun` always polls for a recently-created run after dispatching, even when dispatch errored. If GH queued the run despite the error, the activity adopts it instead of giving up. This eliminates a whole class of orphan runs that previously accumulated in GH while Dapr had forgotten about them.
+
+3. **Activity retry policy.** Both the Packer build and the Promote activities are wrapped in durable retry policies:
+   - Packer build: 2 attempts, 30s initial backoff, 5m total timeout. Conservative to avoid kicking off a second long-running build.
+   - Promote: 3 attempts, 10s initial backoff, 10m total timeout. Safe to retry — the promote workflow's `continue-on-error` on the delete step handles pre-existing templates.
+
+4. **Manual resume mode.** For the case where a previous Dapr run terminated after GH had already started the Packer build (so a template exists in vCenter but Dapr has no memory of it), set `existingTemplateName` in the input JSON:
+
+   ```json
+   "existingTemplateName": "ubuntu26-base-os-20260423-1428"
+   ```
+
+   When set, the workflow skips the Packer build step entirely and jumps straight to promote with the given template name. See [examples/inputs/vsphere-ubuntu26-labda-resume.json](examples/inputs/vsphere-ubuntu26-labda-resume.json).
+
+   Use case: Dapr terminated with `dispatch returned 500` but the GH build is still running or finished. Wait for the GH run to finish, note the template name from its summary, then re-run Dapr with that name set — you get the promote step without paying for a second Packer build.
 
 ### HTTP API (server mode)
 

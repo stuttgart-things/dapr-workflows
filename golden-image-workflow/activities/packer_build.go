@@ -61,21 +61,15 @@ func PackerBuildActivity(ctx workflow.ActivityContext) (any, error) {
 		inputs["dagger-version"] = input.DaggerVersion
 	}
 
-	dispatchTime := time.Now()
-	err := client.DispatchWorkflow(bgCtx, gh.DispatchWorkflowInput{
+	runID, err := client.DispatchAndFindRun(bgCtx, gh.DispatchWorkflowInput{
 		Owner:        input.Owner,
 		Repo:         input.Repo,
 		WorkflowFile: input.WorkflowFile,
 		Ref:          input.Ref,
 		Inputs:       inputs,
-	})
+	}, 2*time.Minute)
 	if err != nil {
 		return nil, fmt.Errorf("dispatch packer-build workflow: %w", err)
-	}
-
-	runID, err := client.FindRunByDispatch(bgCtx, input.Owner, input.Repo, input.WorkflowFile, dispatchTime, 10*time.Second, 2*time.Minute)
-	if err != nil {
-		return nil, fmt.Errorf("find packer-build run: %w", err)
 	}
 
 	result, err := client.WaitForCompletion(bgCtx, input.Owner, input.Repo, runID, 30*time.Second, 60*time.Minute)

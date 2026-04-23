@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -20,6 +21,9 @@ func main() {
 	// Create workflow registry and register workflow + activities
 	r := workflow.NewRegistry()
 	if err := r.AddWorkflowN("GoldenImageBuildWorkflow", GoldenImageBuildWorkflow); err != nil {
+		log.Fatalf("failed to register workflow: %v", err)
+	}
+	if err := r.AddWorkflowN("VsphereTemplateWorkflow", VsphereTemplateWorkflow); err != nil {
 		log.Fatalf("failed to register workflow: %v", err)
 	}
 
@@ -57,20 +61,39 @@ func main() {
 	time.Sleep(2 * time.Second)
 	log.Println("workflow worker started")
 
-	// If --run flag is passed, start a workflow from JSON input file and exit
+	// If --run flag is passed, start a workflow from JSON input file and exit.
+	// Usage:
+	//   --run --input <file.json>                               (defaults to GoldenImageBuildWorkflow)
+	//   --run --workflow <Name> --input <file.json>
 	if len(os.Args) > 1 && os.Args[1] == "--run" {
 		inputFile := ""
-		if len(os.Args) > 3 && os.Args[2] == "--input" {
-			inputFile = os.Args[3]
-		} else if len(os.Args) > 2 {
-			inputFile = os.Args[2]
+		workflowName := "GoldenImageBuildWorkflow"
+		args := os.Args[2:]
+		for i := 0; i < len(args); i++ {
+			switch args[i] {
+			case "--input":
+				if i+1 < len(args) {
+					inputFile = args[i+1]
+					i++
+				}
+			case "--workflow":
+				if i+1 < len(args) {
+					workflowName = args[i+1]
+					i++
+				}
+			default:
+				// legacy positional form: --run <file.json>
+				if inputFile == "" {
+					inputFile = args[i]
+				}
+			}
 		}
 
 		if inputFile == "" {
-			log.Fatal("usage: golden-image-workflow --run --input <file.json>")
+			log.Fatal("usage: golden-image-workflow --run [--workflow <Name>] --input <file.json>")
 		}
 
-		if err := runWorkflowFromFile(ctx, wfClient, inputFile); err != nil {
+		if err := runWorkflowFromFile(ctx, wfClient, workflowName, inputFile); err != nil {
 			log.Fatalf("workflow failed: %v", err)
 		}
 		return
@@ -79,6 +102,7 @@ func main() {
 	// Otherwise, start HTTP server for API triggers
 	mux := http.NewServeMux()
 	mux.HandleFunc("/start", startWorkflowHandler)
+	mux.HandleFunc("/start-vsphere-template", startVsphereTemplateHandler)
 	mux.HandleFunc("/status/", statusWorkflowHandler)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -102,39 +126,64 @@ func main() {
 	server.Shutdown(context.Background())
 }
 
-func runWorkflowFromFile(ctx context.Context, wfClient *workflow.Client, inputFile string) error {
+func runWorkflowFromFile(ctx context.Context, wfClient *workflow.Client, workflowName, inputFile string) error {
 	data, err := os.ReadFile(inputFile)
 	if err != nil {
 		return fmt.Errorf("read input file %s: %w", inputFile, err)
 	}
 
-	var input types.GoldenImageBuildInput
-	if err := json.Unmarshal(data, &input); err != nil {
-		return fmt.Errorf("parse input file: %w", err)
+	var (
+		inputPayload any
+		instanceID   string
+	)
+
+	switch workflowName {
+	case "GoldenImageBuildWorkflow":
+		var input types.GoldenImageBuildInput
+		if err := json.Unmarshal(data, &input); err != nil {
+			return fmt.Errorf("parse input file: %w", err)
+		}
+		if input.GitHub.Token == "" {
+			input.GitHub.Token = os.Getenv("GITHUB_TOKEN")
+		}
+		if input.GitHub.Token == "" {
+			return fmt.Errorf("no GitHub token: set 'github.token' in JSON or GITHUB_TOKEN env var")
+		}
+		instanceID = fmt.Sprintf("%s-%s-%d", input.Environment, input.OSProfile, time.Now().Unix())
+		if input.RunID != "" {
+			instanceID = input.RunID
+		}
+		inputPayload = input
+
+	case "VsphereTemplateWorkflow":
+		var input types.VsphereTemplateInput
+		if err := json.Unmarshal(data, &input); err != nil {
+			return fmt.Errorf("parse input file: %w", err)
+		}
+		if input.GitHub.Token == "" {
+			input.GitHub.Token = os.Getenv("GITHUB_TOKEN")
+		}
+		if input.GitHub.Token == "" {
+			return fmt.Errorf("no GitHub token: set 'github.token' in JSON or GITHUB_TOKEN env var")
+		}
+		instanceID = fmt.Sprintf("vsphere-%s-%s-%d", input.Environment, input.OSProfile, time.Now().Unix())
+		if input.RunID != "" {
+			instanceID = input.RunID
+		}
+		inputPayload = input
+
+	default:
+		return fmt.Errorf("unknown workflow name: %s", workflowName)
 	}
 
-	// Allow GITHUB_TOKEN from env to override empty token in JSON
-	if input.GitHub.Token == "" {
-		input.GitHub.Token = os.Getenv("GITHUB_TOKEN")
-	}
-
-	if input.GitHub.Token == "" {
-		return fmt.Errorf("no GitHub token: set 'github.token' in JSON or GITHUB_TOKEN env var")
-	}
-
-	instanceID := fmt.Sprintf("%s-%s-%d", input.Environment, input.OSProfile, time.Now().Unix())
-	if input.RunID != "" {
-		instanceID = input.RunID
-	}
-
-	id, err := wfClient.ScheduleWorkflow(ctx, "GoldenImageBuildWorkflow",
+	id, err := wfClient.ScheduleWorkflow(ctx, workflowName,
 		workflow.WithInstanceID(instanceID),
-		workflow.WithInput(input),
+		workflow.WithInput(inputPayload),
 	)
 	if err != nil {
 		return fmt.Errorf("failed to schedule workflow: %w", err)
 	}
-	log.Printf("workflow started: instanceID=%s", id)
+	log.Printf("workflow started: name=%s instanceID=%s", workflowName, id)
 
 	// Wait for completion
 	meta, err := wfClient.WaitForWorkflowCompletion(ctx, id)
@@ -149,13 +198,12 @@ func runWorkflowFromFile(ctx context.Context, wfClient *workflow.Client, inputFi
 	}
 
 	if meta.Output != nil {
-		var output types.GoldenImageBuildOutput
-		if err := json.Unmarshal([]byte(meta.Output.GetValue()), &output); err != nil {
-			log.Printf("could not deserialize output: %v", err)
-			log.Printf("raw output: %s", meta.Output.GetValue())
+		raw := meta.Output.GetValue()
+		var pretty bytes.Buffer
+		if err := json.Indent(&pretty, []byte(raw), "", "  "); err == nil {
+			log.Printf("workflow output:\n%s", pretty.String())
 		} else {
-			result, _ := json.MarshalIndent(output, "", "  ")
-			log.Printf("workflow output:\n%s", string(result))
+			log.Printf("raw output: %s", raw)
 		}
 	}
 
@@ -195,9 +243,9 @@ func statusWorkflowHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if meta.Output != nil {
-		var output types.GoldenImageBuildOutput
-		if err := json.Unmarshal([]byte(meta.Output.GetValue()), &output); err == nil {
-			response["output"] = output
+		var out json.RawMessage
+		if err := json.Unmarshal([]byte(meta.Output.GetValue()), &out); err == nil {
+			response["output"] = out
 		}
 	}
 
@@ -210,6 +258,49 @@ func statusWorkflowHandler(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
+}
+
+func startVsphereTemplateHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var input types.VsphereTemplateInput
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		http.Error(w, fmt.Sprintf("invalid input: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	if input.GitHub.Token == "" {
+		input.GitHub.Token = os.Getenv("GITHUB_TOKEN")
+	}
+
+	wfClient, err := dapr.NewWorkflowClient()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("workflow client error: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	instanceID := fmt.Sprintf("vsphere-%s-%s-%d", input.Environment, input.OSProfile, time.Now().Unix())
+	if input.RunID != "" {
+		instanceID = input.RunID
+	}
+
+	id, err := wfClient.ScheduleWorkflow(r.Context(), "VsphereTemplateWorkflow",
+		workflow.WithInstanceID(instanceID),
+		workflow.WithInput(input),
+	)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("failed to start workflow: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"instanceID": id,
+		"status":     "started",
+	})
 }
 
 func startWorkflowHandler(w http.ResponseWriter, r *http.Request) {

@@ -1,4 +1,4 @@
-golden-image-workflow/golden-image-workflow
-backstage-template-execution/backstage-template-execution
+workflows/golden-image-workflow/golden-image-workflow
+workflows/backstage-template-execution/backstage-template-execution
 .claude/
 .task/

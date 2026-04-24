@@ -1,0 +1,138 @@
+---
+name: Build & Scan Changed Workflows
+on:
+  push:
+    branches: [main]
+    paths:
+      - "workflows/**"
+  pull_request:
+    branches: [main]
+    paths:
+      - "workflows/**"
+  workflow_dispatch:
+    inputs:
+      force-all:
+        description: "Rebuild every workflow under workflows/"
+        type: boolean
+        default: false
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  detect:
+    name: Detect changed workflow dirs
+    runs-on: ubuntu-latest
+    outputs:
+      dirs: ${{ steps.set.outputs.dirs }}
+      any: ${{ steps.set.outputs.any }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - id: set
+        env:
+          FORCE_ALL: ${{ github.event.inputs.force-all }}
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+
+          all_dirs() {
+            find workflows -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort
+          }
+
+          if [[ "$FORCE_ALL" == "true" || "$EVENT" == "workflow_dispatch" ]]; then
+            mapfile -t dirs < <(all_dirs)
+          else
+            # Guard against missing/empty BASE_SHA (first push, shallow clones)
+            if [[ -z "$BASE_SHA" || "$BASE_SHA" == "0000000000000000000000000000000000000000" ]]; then
+              mapfile -t dirs < <(all_dirs)
+            else
+              mapfile -t dirs < <(
+                git diff --name-only "$BASE_SHA" "$HEAD_SHA" -- 'workflows/*' \
+                  | awk -F/ '$1=="workflows" && NF>=2 {print $2}' \
+                  | sort -u
+              )
+            fi
+          fi
+
+          if [[ ${#dirs[@]} -eq 0 ]]; then
+            echo "dirs=[]" >> "$GITHUB_OUTPUT"
+            echo "any=false" >> "$GITHUB_OUTPUT"
+            echo "No changed workflow dirs."
+            exit 0
+          fi
+
+          json=$(printf '%s\n' "${dirs[@]}" | jq -Rcn '[inputs]')
+          echo "dirs=$json" >> "$GITHUB_OUTPUT"
+          echo "any=true" >> "$GITHUB_OUTPUT"
+          echo "Changed dirs: $json"
+
+  plan:
+    name: Plan image refs
+    needs: detect
+    if: needs.detect.outputs.any == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.build.outputs.matrix }}
+    steps:
+      - id: build
+        env:
+          DIRS: ${{ needs.detect.outputs.dirs }}
+          REPO_NAME: ${{ github.event.repository.name }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          SHORT_SHA=${SHA:0:7}
+          matrix=$(jq -cn --argjson dirs "$DIRS" --arg repo "$REPO_NAME" --arg sha "$SHORT_SHA" '
+            {include: [
+              $dirs[] | {
+                dir: .,
+                image_repo: ("ttl.sh/" + $repo + "-" + . + "-" + $sha)
+              }
+            ]}
+          ')
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "$matrix" | jq .
+
+  security-scan:
+    needs: [detect, plan]
+    if: needs.detect.outputs.any == 'true'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    uses: stuttgart-things/github-workflow-templates/.github/workflows/call-dagger-security-scan.yaml@main
+    with:
+      working-directory: workflows/${{ matrix.dir }}
+      artifact-name: security-report-${{ matrix.dir }}
+
+  build:
+    needs: [detect, plan, security-scan]
+    if: needs.detect.outputs.any == 'true'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    uses: stuttgart-things/github-workflow-templates/.github/workflows/call-dagger-ko-build.yaml@main
+    with:
+      working-directory: workflows/${{ matrix.dir }}
+      image-repo: ${{ matrix.image_repo }}
+    secrets: inherit # pragma: allowlist secret
+
+  trivy-scan:
+    needs: [detect, plan, build]
+    if: needs.detect.outputs.any == 'true'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    uses: stuttgart-things/github-workflow-templates/.github/workflows/call-dagger-trivy-image-scan.yaml@main
+    with:
+      image-ref: ${{ matrix.image_repo }}:latest
+      artifact-name: trivy-report-${{ matrix.dir }}

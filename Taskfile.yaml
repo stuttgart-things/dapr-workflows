@@ -7,8 +7,8 @@ includes:
 dotenv: ['.env', '{{.HOME}}/.env']
 
 vars:
-  DAGGER_GO_MODULE: github.com/stuttgart-things/dagger/go@v0.91.0
-  DAGGER_TRIVY_MODULE: github.com/stuttgart-things/dagger/trivy@v0.91.0
+  DAGGER_GO_MODULE: github.com/stuttgart-things/dagger/go@v0.103.0
+  DAGGER_TRIVY_MODULE: github.com/stuttgart-things/dagger/trivy@v0.103.0
   KO_VERSION: 1c688bd6325d7b041fdc7d1be092f96054c35d39  # pragma: allowlist secret
 
 tasks:
@@ -16,6 +16,61 @@ tasks:
     desc: List available tasks
     cmds:
       - task --list
+
+  security-scan:
+    desc: Run gosec via Dagger against a workflow dir (requires SOURCE_CODE_DIR)
+    requires:
+      vars: [SOURCE_CODE_DIR]
+    vars:
+      PROJECT: 'dapr-{{ base .SOURCE_CODE_DIR }}'
+      SECURE_GO_VERSION: '{{ .SECURE_GO_VERSION | default "2.24.6" }}'
+      REPORT: '/tmp/security-report-{{ .PROJECT }}.txt'
+    cmds:
+      - |
+        echo "Running gosec on {{ .SOURCE_CODE_DIR }} (gosec {{ .SECURE_GO_VERSION }})"
+
+        dagger call -m {{ .DAGGER_GO_MODULE }} security-scan \
+          --src "{{ .SOURCE_CODE_DIR }}" \
+          --secure-go-version "{{ .SECURE_GO_VERSION }}" \
+          --progress plain \
+          export --path="{{ .REPORT }}"
+
+        echo ""
+        echo "Report: {{ .REPORT }}"
+        tail -20 "{{ .REPORT }}"
+
+  trivy-scan-image:
+    desc: Trivy-scan an already-pushed image via Dagger (requires IMAGE_REF)
+    requires:
+      vars: [IMAGE_REF]
+    vars:
+      SEVERITY: '{{ .SEVERITY | default "HIGH,CRITICAL" }}'
+      REPORT: '/tmp/trivy-scan-{{ .IMAGE_REF | replace "/" "_" | replace ":" "_" }}.json'
+    cmds:
+      - |
+        echo "Scanning {{ .IMAGE_REF }} (severity: {{ .SEVERITY }})"
+
+        dagger call -m {{ .DAGGER_TRIVY_MODULE }} scan-image \
+          --image-ref "{{ .IMAGE_REF }}" \
+          --severity "{{ .SEVERITY }}" \
+          --progress plain \
+          export --path="{{ .REPORT }}"
+
+        echo "Report: {{ .REPORT }}"
+
+  pipeline:
+    desc: Run the full gosec + ko-build + trivy pipeline (mirrors the GH orchestrator — requires SOURCE_CODE_DIR)
+    requires:
+      vars: [SOURCE_CODE_DIR]
+    vars:
+      SECURE_GO_VERSION: '{{ .SECURE_GO_VERSION | default "2.24.6" }}'
+    cmds:
+      - task: security-scan
+        vars:
+          SOURCE_CODE_DIR: '{{ .SOURCE_CODE_DIR }}'
+          SECURE_GO_VERSION: '{{ .SECURE_GO_VERSION }}'
+      - task: build-scan-image-ko
+        vars: {SOURCE_CODE_DIR: '{{ .SOURCE_CODE_DIR }}'}
 
   build-scan-image-ko:
     desc: Build, push to ttl.sh and scan a workflow container image with ko (requires SOURCE_CODE_DIR)
@@ -103,7 +158,7 @@ tasks:
         fi
 
   build:
-    desc: Interactively choose a workflow and build its container image (requires gum)
+    desc: Interactively choose a workflow + action (gosec / build / pipeline) — requires gum
     cmds:
       - |
         if ! command -v gum &> /dev/null; then
@@ -111,19 +166,27 @@ tasks:
           exit 1
         fi
 
-        # discover workflow folders (any top-level dir containing a go.mod)
-        mapfile -t DIRS < <(find . -mindepth 2 -maxdepth 2 -name go.mod -printf '%h\n' \
-          | sed 's|^\./||' | sort -u)
+        # discover workflow folders under workflows/ (any dir containing go.mod)
+        mapfile -t DIRS < <(find workflows -mindepth 2 -maxdepth 2 -name go.mod -printf '%h\n' \
+          | sort -u)
 
         if [ ${#DIRS[@]} -eq 0 ]; then
-          echo "no workflow folders with a go.mod found"
+          echo "no workflow folders with a go.mod found under workflows/"
           exit 1
         fi
 
-        TARGET=$(printf '%s\n' "${DIRS[@]}" | gum choose --header="Select workflow to build:")
-        if [ -z "$TARGET" ]; then
-          echo "no selection"
-          exit 1
-        fi
+        TARGET=$(printf '%s\n' "${DIRS[@]}" | gum choose --header="Select workflow:")
+        [ -z "$TARGET" ] && { echo "no selection"; exit 1; }
 
-        task build-scan-image-ko SOURCE_CODE_DIR="./$TARGET"
+        ACTION=$(printf '%s\n' \
+          "pipeline (gosec + ko-build + trivy)" \
+          "security-scan (gosec only)" \
+          "build-scan-image-ko (ko-build + trivy)" \
+          | gum choose --header="Select action:")
+        [ -z "$ACTION" ] && { echo "no selection"; exit 1; }
+
+        case "$ACTION" in
+          pipeline*)          task pipeline SOURCE_CODE_DIR="./$TARGET" ;;
+          security-scan*)     task security-scan SOURCE_CODE_DIR="./$TARGET" ;;
+          build-scan-image*)  task build-scan-image-ko SOURCE_CODE_DIR="./$TARGET" ;;
+        esac

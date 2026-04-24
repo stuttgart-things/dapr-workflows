@@ -124,6 +124,7 @@ jobs:
     with:
       working-directory: workflows/${{ matrix.dir }}
       image-repo: ${{ matrix.image_repo }}
+      image-ref-artifact: image-ref-${{ matrix.dir }}
     secrets: inherit # pragma: allowlist secret
 
   trivy-scan:
@@ -134,5 +135,5 @@ jobs:
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     uses: stuttgart-things/github-workflow-templates/.github/workflows/call-dagger-trivy-image-scan.yaml@main
     with:
-      image-ref: ${{ matrix.image_repo }}:latest
+      image-ref-artifact: image-ref-${{ matrix.dir }}
       artifact-name: trivy-report-${{ matrix.dir }}

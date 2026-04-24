@@ -1,11 +1,10 @@
 {
   "runID": "",
-  "environment": "labda",
+  "environment": "labul",
   "osProfile": "ubuntu26",
   "osFamily": "ubuntu",
   "provisioning": "base-os",
   "branch": "main",
-  "existingTemplateName": "ubuntu26-base-20260424-0941",
   "github": {
     "owner": "stuttgart-things",
     "repo": "stuttgart-things",
@@ -14,7 +13,7 @@
   "packer": {
     "workflowFile": "dispatch-packer-build-dagger.yaml",
     "packerVersion": "1.15.1",
-    "runner": "dagger-labda",
+    "runner": "dagger-labul",
     "daggerVersion": "0.20.6"
   },
   "promotion": {
@@ -22,6 +21,6 @@
     "targetName": "sthings-u26",
     "buildFolder": "",
     "goldenFolder": "",
-    "runner": "dagger-labda"
+    "runner": "dagger-labul"
   }
 }

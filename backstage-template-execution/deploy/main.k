@@ -19,10 +19,10 @@ _redisHost = "redis-stack.homerun2-flux.svc.cluster.local:6379"
 # ingress cert). Source is either "configmap" (default, PEM stored in
 # _caConfigMapData) or "secret" (reference an existing Secret by name).
 # SSL_CERT_FILE is set so Go's TLS stack picks it up.
-_enableCA: bool = True
-_caSource: str = "configmap"  # "configmap" | "secret"
+_enableCA: bool = True # pragma: allowlist secret
+_caSource: str = "configmap"  # "configmap" | "secret" # pragma: allowlist secret
 _caConfigMapName = "backstage-ca"
-_caSecretName = "backstage-ca"
+_caSecretName = "backstage-ca" # pragma: allowlist secret
 _caFileName = "ca.pem"
 _caMountPath = "/etc/ssl/backstage"
 _caConfigMapData = """-----BEGIN CERTIFICATE-----
@@ -63,7 +63,7 @@ redisSecret = corev1.Secret {
     }
     type = "Opaque"
     stringData = {
-        password = "REPLACE_WITH_REDIS_PASSWORD"
+        password = "REPLACE_WITH_REDIS_PASSWORD" # pragma: allowlist secret
     }
 }
 

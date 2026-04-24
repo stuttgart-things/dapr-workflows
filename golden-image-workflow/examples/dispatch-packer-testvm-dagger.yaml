@@ -53,7 +53,7 @@ env:
   TEMPLATES_DIR: packer/templates/test-vm
   ENV_DIR: packer/environments
   ENV_FILE: ${{ inputs.lab }}-vsphere-v2.yaml
-  SOPS_SECRETS_FILE: terraform/secrets/${{ inputs.lab }}.tfvars.enc.json
+  SOPS_SECRETS_FILE: terraform/secrets/${{ inputs.lab }}.tfvars.enc.json  # pragma: allowlist secret
 
 jobs:
   test-vm:

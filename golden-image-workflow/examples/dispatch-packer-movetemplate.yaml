@@ -42,7 +42,7 @@ permissions:
   contents: read
 
 env:
-  SOPS_SECRETS_FILE: terraform/secrets/${{ inputs.lab }}.tfvars.enc.json
+  SOPS_SECRETS_FILE: terraform/secrets/${{ inputs.lab }}.tfvars.enc.json  # pragma: allowlist secret
 
 jobs:
   move-template:

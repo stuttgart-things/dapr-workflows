@@ -29,8 +29,8 @@ spec:
     pve_cluster_node: ul-pve01
     pve_datastore: V5010-01-1
     pve_network: vmbr0
-    vault_secret: proxmox-labul
-    secrets_mode: sops
+    vault_secret: proxmox-labul  # pragma: allowlist secret
+    secrets_mode: sops  # pragma: allowlist secret
     s3_endpoint: https://artifacts.demo-infra.sthings-vsphere.labul.sva.de
     s3_bucket: state
     s3_region: main

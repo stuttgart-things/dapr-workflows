@@ -9,7 +9,7 @@ dotenv: ['.env', '{{.HOME}}/.env']
 vars:
   DAGGER_GO_MODULE: github.com/stuttgart-things/dagger/go@v0.91.0
   DAGGER_TRIVY_MODULE: github.com/stuttgart-things/dagger/trivy@v0.91.0
-  KO_VERSION: 1c688bd6325d7b041fdc7d1be092f96054c35d39
+  KO_VERSION: 1c688bd6325d7b041fdc7d1be092f96054c35d39  # pragma: allowlist secret
 
 tasks:
   default:

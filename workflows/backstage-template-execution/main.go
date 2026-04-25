@@ -1,6 +1,8 @@
 package main
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/json"
@@ -79,7 +81,7 @@ func BackstageTemplateWorkflow(ctx *workflow.WorkflowContext) (any, error) {
 		return nil, fmt.Errorf("input.stages is empty")
 	}
 
-	exports := map[string]string{} // "<stageName>.<key>" -> value
+	exports := map[string]any{} // "<stageName>.<key>" -> value (any JSON type)
 	var results []StageResult
 
 	for i, stage := range in.Stages {
@@ -187,7 +189,7 @@ func BackstageTemplateWorkflow(ctx *workflow.WorkflowContext) (any, error) {
 					RunID:   ghRun.ID,
 					Exports: stage.Exports,
 				}
-				var resolved map[string]string
+				var resolved map[string]any
 				if err := ctx.CallActivity(FetchStageExports, workflow.WithActivityInput(expIn)).Await(&resolved); err != nil {
 					results = append(results, result)
 					return results, fmt.Errorf("%s exports: %w", label, err)
@@ -244,10 +246,17 @@ func watchGHRun(ctx *workflow.WorkflowContext, label string, stage Stage, dispat
 	return &ghRun, fmt.Errorf("timed out waiting for gh workflow %s", stage.Watch.WorkflowFile)
 }
 
-// resolveValues recursively walks v and replaces strings of the form
-// "${stages.<stageName>.<key>}" with the corresponding entry in exports.
-// Any unmatched placeholder returns an error.
-func resolveValues(v map[string]interface{}, exports map[string]string) (map[string]interface{}, error) {
+// resolveValues recursively walks v and replaces strings containing
+// "${stages.<stageName>.<key>}" placeholders with the corresponding entry
+// in exports.
+//
+// Type rules:
+//   - A string that is *exactly* one placeholder ("${stages.X.Y}") is replaced
+//     with the raw exported value, preserving its JSON type (string, list,
+//     number, bool). This lets a list export populate a list-typed field.
+//   - A string with a placeholder embedded in literal text gets stringified
+//     interpolation: each placeholder is rendered via fmt.Sprintf("%v", ...).
+func resolveValues(v map[string]interface{}, exports map[string]any) (map[string]interface{}, error) {
 	out := make(map[string]interface{}, len(v))
 	for k, val := range v {
 		resolved, err := resolveAny(val, exports)
@@ -259,10 +268,10 @@ func resolveValues(v map[string]interface{}, exports map[string]string) (map[str
 	return out, nil
 }
 
-func resolveAny(v interface{}, exports map[string]string) (interface{}, error) {
+func resolveAny(v interface{}, exports map[string]any) (interface{}, error) {
 	switch x := v.(type) {
 	case string:
-		return resolveString(x, exports)
+		return resolveStringValue(x, exports)
 	case []interface{}:
 		out := make([]interface{}, len(x))
 		for i, el := range x {
@@ -280,28 +289,44 @@ func resolveAny(v interface{}, exports map[string]string) (interface{}, error) {
 	}
 }
 
-func resolveString(s string, exports map[string]string) (string, error) {
+// resolveStringValue applies the type rules described on resolveValues.
+// Returns interface{}: either the raw exported value (whole-string match) or
+// the interpolated string.
+func resolveStringValue(s string, exports map[string]any) (interface{}, error) {
 	const open, close = "${stages.", "}"
+
+	// Whole-string placeholder? Preserve the value's native JSON type.
+	if strings.HasPrefix(s, open) && strings.HasSuffix(s, close) &&
+		strings.Index(s, close) == len(s)-len(close) {
+		key := s[len(open) : len(s)-len(close)]
+		val, ok := exports[key]
+		if !ok {
+			return nil, fmt.Errorf("unknown export %q (have: %v)", key, mapKeys(exports))
+		}
+		return val, nil
+	}
+
+	// Otherwise: interpolate every placeholder as a string.
 	out := s
 	for {
 		i := strings.Index(out, open)
 		if i < 0 {
 			return out, nil
 		}
-		j := strings.Index(out[i:], close)
-		if j < 0 {
-			return "", fmt.Errorf("unterminated placeholder in %q", s)
+		rel := strings.Index(out[i:], close)
+		if rel < 0 {
+			return nil, fmt.Errorf("unterminated placeholder in %q", s)
 		}
-		key := out[i+len(open) : i+j]
+		key := out[i+len(open) : i+rel]
 		val, ok := exports[key]
 		if !ok {
-			return "", fmt.Errorf("unknown export %q (have: %v)", key, mapKeys(exports))
+			return nil, fmt.Errorf("unknown export %q (have: %v)", key, mapKeys(exports))
 		}
-		out = out[:i] + val + out[i+j+len(close):]
+		out = out[:i] + fmt.Sprintf("%v", val) + out[i+rel+len(close):]
 	}
 }
 
-func mapKeys(m map[string]string) []string {
+func mapKeys(m map[string]any) []string {
 	keys := make([]string, 0, len(m))
 	for k := range m {
 		keys = append(keys, k)
@@ -336,7 +361,7 @@ type StageResult struct {
 	TaskStatus string            `json:"taskStatus,omitempty"`
 	GitHubRun  *GitHubRunStatus  `json:"githubRun,omitempty"`
 	Merge      *MergeResult      `json:"merge,omitempty"`
-	Exports    map[string]string `json:"exports,omitempty"`
+	Exports    map[string]any `json:"exports,omitempty"`
 }
 
 type MergeInput struct {
@@ -729,17 +754,137 @@ func MergePullRequest(ctx workflow.ActivityContext) (any, error) {
 	}, nil
 }
 
-// FetchStageExports resolves a stage's `exports` map into concrete values.
-// NOT YET IMPLEMENTED — see issue #21. The original plan called for GitHub job
-// outputs, but those are not exposed via REST; we'll switch to artifact-based
-// transport (artifact contains outputs.json with a flat string map).
-// Until that is wired up, callers should leave `exports` empty.
+// FetchStageExports resolves a stage's `exports` map by reading artifacts
+// uploaded by the watched GitHub Actions run. Each export expression has the
+// form "<artifactName>.<jsonKey>". The named artifact must contain an
+// outputs.json file with a flat object whose values are scalars (stringified
+// on read).
 func FetchStageExports(ctx workflow.ActivityContext) (any, error) {
 	var in FetchExportsInput
 	if err := ctx.GetInput(&in); err != nil {
 		return nil, fmt.Errorf("get input: %w", err)
 	}
-	return nil, fmt.Errorf("FetchStageExports not implemented (run %d, %d exports requested) — see issue #21", in.RunID, len(in.Exports))
+	token := os.Getenv("GITHUB_TOKEN")
+	if token == "" {
+		return nil, fmt.Errorf("GITHUB_TOKEN env var not set in worker process")
+	}
+
+	// Group exports by artifact name so we download each artifact at most once.
+	byArtifact := map[string]map[string]string{} // artifactName -> exportKey -> jsonKey
+	for exportKey, expr := range in.Exports {
+		parts := strings.SplitN(expr, ".", 2)
+		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+			return nil, fmt.Errorf("invalid export expression %q for key %q (want <artifactName>.<jsonKey>)", expr, exportKey)
+		}
+		if byArtifact[parts[0]] == nil {
+			byArtifact[parts[0]] = map[string]string{}
+		}
+		byArtifact[parts[0]][exportKey] = parts[1]
+	}
+
+	listURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/actions/runs/%d/artifacts?per_page=100",
+		in.Owner, in.Repo, in.RunID)
+	listBody, err := ghGet(listURL, token)
+	if err != nil {
+		return nil, fmt.Errorf("list artifacts: %w", err)
+	}
+	var listed struct {
+		Artifacts []struct {
+			ID   int64  `json:"id"`
+			Name string `json:"name"`
+		} `json:"artifacts"`
+	}
+	if err := json.Unmarshal(listBody, &listed); err != nil {
+		return nil, fmt.Errorf("parse artifact list: %w", err)
+	}
+
+	out := map[string]any{}
+	for artName, keyMap := range byArtifact {
+		var artID int64
+		for _, a := range listed.Artifacts {
+			if a.Name == artName {
+				artID = a.ID
+				break
+			}
+		}
+		if artID == 0 {
+			names := make([]string, 0, len(listed.Artifacts))
+			for _, a := range listed.Artifacts {
+				names = append(names, a.Name)
+			}
+			return nil, fmt.Errorf("artifact %q not found in run %d (available: %v)", artName, in.RunID, names)
+		}
+
+		dlURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/actions/artifacts/%d/zip",
+			in.Owner, in.Repo, artID)
+		zipBytes, err := ghGet(dlURL, token)
+		if err != nil {
+			return nil, fmt.Errorf("download artifact %q: %w", artName, err)
+		}
+
+		parsed, err := readOutputsJSON(zipBytes)
+		if err != nil {
+			return nil, fmt.Errorf("artifact %q: %w", artName, err)
+		}
+
+		for exportKey, jsonKey := range keyMap {
+			v, ok := parsed[jsonKey]
+			if !ok {
+				return nil, fmt.Errorf("artifact %q outputs.json missing key %q", artName, jsonKey)
+			}
+			out[exportKey] = v
+		}
+	}
+
+	slog.Info("stage exports resolved", "count", len(out))
+	return out, nil
+}
+
+func ghGet(apiURL, token string) ([]byte, error) {
+	req, _ := http.NewRequest(http.MethodGet, apiURL, nil)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, body)
+	}
+	return body, nil
+}
+
+// readOutputsJSON unzips the given artifact bytes and returns the parsed
+// outputs.json contents (a flat map). Errors if outputs.json is missing or
+// not valid JSON.
+func readOutputsJSON(zipBytes []byte) (map[string]interface{}, error) {
+	zr, err := zip.NewReader(bytes.NewReader(zipBytes), int64(len(zipBytes)))
+	if err != nil {
+		return nil, fmt.Errorf("open artifact zip: %w", err)
+	}
+	for _, f := range zr.File {
+		if f.Name != "outputs.json" {
+			continue
+		}
+		rc, err := f.Open()
+		if err != nil {
+			return nil, err
+		}
+		raw, err := io.ReadAll(rc)
+		rc.Close()
+		if err != nil {
+			return nil, err
+		}
+		var out map[string]interface{}
+		if err := json.Unmarshal(raw, &out); err != nil {
+			return nil, fmt.Errorf("parse outputs.json: %w", err)
+		}
+		return out, nil
+	}
+	return nil, fmt.Errorf("zip does not contain outputs.json")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

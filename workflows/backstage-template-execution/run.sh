@@ -43,12 +43,20 @@ INPUT_FILE=${1:-input.json}
 INPUT=$(envsubst < "$INPUT_FILE" 2>/dev/null || cat "$INPUT_FILE")
 
 INSTANCE_ID="run-$(date +%s)"
-DRY_RUN=$(echo "$INPUT" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("dryRun", False))' 2>/dev/null || echo "False")
-TEMPLATE=$(echo "$INPUT"  | python3 -c 'import sys,json; print(json.load(sys.stdin)["templateRef"])')
+SUMMARY=$(echo "$INPUT" | python3 -c '
+import sys, json
+d = json.load(sys.stdin)
+stages = d.get("stages", [])
+print(f"stages   : {len(stages)}")
+for i, s in enumerate(stages):
+    name = s.get("name") or f"stage{i}"
+    tpl  = s.get("templateRef","?")
+    dry  = " (dry-run)" if s.get("dryRun") else ""
+    print(f"  [{i+1}] {name}: {tpl}{dry}")
+')
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo " Template : $TEMPLATE"
-echo " DryRun   : $DRY_RUN"
+echo "$SUMMARY"
 echo " Instance : $INSTANCE_ID"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 

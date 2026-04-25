@@ -33,21 +33,32 @@ var backstageClient = func() *http.Client {
 // ─────────────────────────────────────────────────────────────────────────────
 
 type Input struct {
-	BackstageURL string                 `json:"backstageURL"`
-	TemplateRef  string                 `json:"templateRef"`
-	Values       map[string]interface{} `json:"values"`
-	AuthToken    string                 `json:"authToken"`
-	DryRun       bool                   `json:"dryRun"`
-	Watch        *GitHubWatch           `json:"watch,omitempty"`
+	BackstageURL string  `json:"backstageURL"`
+	AuthToken    string  `json:"authToken"`
+	Stages       []Stage `json:"stages"`
 }
 
-type GitHubWatch struct {
-	Owner        string      `json:"owner"`
-	Repo         string      `json:"repo"`
-	WorkflowFile string      `json:"workflowFile"`
-	Branch       string      `json:"branch"`
-	TimeoutMin   int         `json:"timeoutMin"`
-	Merge        *MergeConfig `json:"merge,omitempty"`
+type Stage struct {
+	Name        string                 `json:"name"`
+	TemplateRef string                 `json:"templateRef"`
+	Values      map[string]interface{} `json:"values"`
+	DryRun      bool                   `json:"dryRun"`
+	Watch       *StageWatch            `json:"watch,omitempty"`
+	// Exports maps an output key (under this stage's namespace) to a source
+	// expression. Currently only the artifact transport is planned:
+	//   "<artifactName>.<jsonKey>"  (artifact must contain outputs.json with a flat string map)
+	// The activity that resolves these is not implemented yet — see issue #21.
+	Exports map[string]string `json:"exports,omitempty"`
+}
+
+type StageWatch struct {
+	Kind         string       `json:"kind"` // "pr" | "dispatch"
+	Owner        string       `json:"owner"`
+	Repo         string       `json:"repo"`
+	WorkflowFile string       `json:"workflowFile"`
+	Branch       string       `json:"branch,omitempty"` // only meaningful for kind=pr
+	TimeoutMin   int          `json:"timeoutMin"`
+	Merge        *MergeConfig `json:"merge,omitempty"` // only honored for kind=pr
 }
 
 type MergeConfig struct {
@@ -64,119 +75,268 @@ func BackstageTemplateWorkflow(ctx *workflow.WorkflowContext) (any, error) {
 	if err := ctx.GetInput(&in); err != nil {
 		return nil, err
 	}
-
-	ctx.SetCustomStatus("calling backstage scaffolder")
-
-	var result ScaffolderResult
-	if err := ctx.CallActivity(CallScaffolder, workflow.WithActivityInput(in)).Await(&result); err != nil {
-		return nil, fmt.Errorf("scaffolder call failed: %w", err)
+	if len(in.Stages) == 0 {
+		return nil, fmt.Errorf("input.stages is empty")
 	}
 
-	if in.DryRun {
-		ctx.SetCustomStatus(fmt.Sprintf("dry-run complete: task %s", result.TaskID))
-		return &result, nil
-	}
+	exports := map[string]string{} // "<stageName>.<key>" -> value
+	var results []StageResult
 
-	ctx.SetCustomStatus(fmt.Sprintf("polling task %s", result.TaskID))
-
-	for i := range 40 {
-		if err := ctx.CreateTimer(5 * time.Second).Await(nil); err != nil {
-			return nil, err
+	for i, stage := range in.Stages {
+		if stage.Name == "" {
+			stage.Name = fmt.Sprintf("stage%d", i)
 		}
+		label := fmt.Sprintf("[%d/%d %s]", i+1, len(in.Stages), stage.Name)
 
-		pollIn := PollInput{
+		resolved, err := resolveValues(stage.Values, exports)
+		if err != nil {
+			return results, fmt.Errorf("%s resolve values: %w", label, err)
+		}
+		stage.Values = resolved
+
+		ctx.SetCustomStatus(label + " calling scaffolder")
+
+		scaffIn := ScaffolderInput{
 			BackstageURL: in.BackstageURL,
-			TaskID:       result.TaskID,
 			AuthToken:    in.AuthToken,
+			TemplateRef:  stage.TemplateRef,
+			Values:       stage.Values,
+			DryRun:       stage.DryRun,
+		}
+		var scaffOut ScaffolderResult
+		if err := ctx.CallActivity(CallScaffolder, workflow.WithActivityInput(scaffIn)).Await(&scaffOut); err != nil {
+			return results, fmt.Errorf("%s scaffolder: %w", label, err)
 		}
 
-		var status TaskStatus
-		if err := ctx.CallActivity(PollTask, workflow.WithActivityInput(pollIn)).Await(&status); err != nil {
-			return nil, err
+		result := StageResult{
+			Name:   stage.Name,
+			TaskID: scaffOut.TaskID,
+			LogURL: scaffOut.LogURL,
+			DryRun: scaffOut.DryRun,
 		}
 
-		ctx.SetCustomStatus(fmt.Sprintf("[%d/40] task %s: %s", i+1, result.TaskID, status.Status))
-
-		switch status.Status {
-		case "completed":
-			result.FinalStatus = "completed"
-			goto scaffolderDone
-		case "failed", "cancelled":
-			return nil, fmt.Errorf("task %s → %s (step: %s)", result.TaskID, status.Status, status.FailedStep)
+		if stage.DryRun {
+			ctx.SetCustomStatus(label + " dry-run done")
+			results = append(results, result)
+			continue
 		}
+
+		// Poll Backstage task until terminal.
+		ctx.SetCustomStatus(fmt.Sprintf("%s polling task %s", label, scaffOut.TaskID))
+		taskDone := false
+		for j := range 40 {
+			if err := ctx.CreateTimer(5 * time.Second).Await(nil); err != nil {
+				return results, err
+			}
+			pollIn := PollInput{
+				BackstageURL: in.BackstageURL,
+				TaskID:       scaffOut.TaskID,
+				AuthToken:    in.AuthToken,
+			}
+			var status TaskStatus
+			if err := ctx.CallActivity(PollTask, workflow.WithActivityInput(pollIn)).Await(&status); err != nil {
+				return results, err
+			}
+			ctx.SetCustomStatus(fmt.Sprintf("%s task %s: %s [%d/40]", label, scaffOut.TaskID, status.Status, j+1))
+			if status.Status == "completed" {
+				taskDone = true
+				break
+			}
+			if status.Status == "failed" || status.Status == "cancelled" {
+				return results, fmt.Errorf("%s task %s → %s (step %s)", label, scaffOut.TaskID, status.Status, status.FailedStep)
+			}
+		}
+		if !taskDone {
+			return results, fmt.Errorf("%s timed out polling task %s", label, scaffOut.TaskID)
+		}
+		result.TaskStatus = "completed"
+
+		if stage.Watch != nil {
+			ghRun, err := watchGHRun(ctx, label, stage, scaffOut.DispatchedAt)
+			result.GitHubRun = ghRun
+			if err != nil {
+				results = append(results, result)
+				return results, fmt.Errorf("%s %w", label, err)
+			}
+
+			if stage.Watch.Kind == "pr" && stage.Watch.Merge != nil && stage.Watch.Merge.Enabled {
+				ctx.SetCustomStatus(fmt.Sprintf("%s merging PR for %s", label, stage.Watch.Branch))
+				method := stage.Watch.Merge.Method
+				if method == "" {
+					method = "squash"
+				}
+				mergeIn := MergeInput{
+					Owner:  stage.Watch.Owner,
+					Repo:   stage.Watch.Repo,
+					Branch: stage.Watch.Branch,
+					Method: method,
+				}
+				var merged MergeResult
+				if err := ctx.CallActivity(MergePullRequest, workflow.WithActivityInput(mergeIn)).Await(&merged); err != nil {
+					results = append(results, result)
+					return results, fmt.Errorf("%s merge: %w", label, err)
+				}
+				result.Merge = &merged
+				ctx.SetCustomStatus(fmt.Sprintf("%s merged PR #%d (%s)", label, merged.PRNumber, merged.SHA))
+			}
+
+			if len(stage.Exports) > 0 {
+				expIn := FetchExportsInput{
+					Owner:   stage.Watch.Owner,
+					Repo:    stage.Watch.Repo,
+					RunID:   ghRun.ID,
+					Exports: stage.Exports,
+				}
+				var resolved map[string]string
+				if err := ctx.CallActivity(FetchStageExports, workflow.WithActivityInput(expIn)).Await(&resolved); err != nil {
+					results = append(results, result)
+					return results, fmt.Errorf("%s exports: %w", label, err)
+				}
+				for k, v := range resolved {
+					exports[stage.Name+"."+k] = v
+				}
+				result.Exports = resolved
+			}
+		}
+
+		results = append(results, result)
 	}
 
-	return nil, fmt.Errorf("timed out waiting for task %s", result.TaskID)
+	return results, nil
+}
 
-scaffolderDone:
-	if in.Watch == nil {
-		return &result, nil
-	}
-
-	// ── watch GitHub Actions run ──────────────────────────────────────────
-	timeoutMin := in.Watch.TimeoutMin
+// watchGHRun polls FetchGitHubRun until the run reaches a terminal state.
+// Returns the final status (non-nil if a run was ever found) and an error
+// if the run failed or polling timed out.
+func watchGHRun(ctx *workflow.WorkflowContext, label string, stage Stage, dispatchedAt string) (*GitHubRunStatus, error) {
+	timeoutMin := stage.Watch.TimeoutMin
 	if timeoutMin <= 0 {
 		timeoutMin = 30
 	}
 	maxIters := (timeoutMin * 60) / 10
-	ctx.SetCustomStatus(fmt.Sprintf("waiting for GH workflow %s on %s", in.Watch.WorkflowFile, in.Watch.Branch))
+	ctx.SetCustomStatus(fmt.Sprintf("%s waiting for %s (%s)", label, stage.Watch.WorkflowFile, stage.Watch.Kind))
+
+	fetchIn := FetchRunInput{
+		Kind:         stage.Watch.Kind,
+		Owner:        stage.Watch.Owner,
+		Repo:         stage.Watch.Repo,
+		WorkflowFile: stage.Watch.WorkflowFile,
+		Branch:       stage.Watch.Branch,
+		DispatchedAt: dispatchedAt,
+	}
 
 	var ghRun GitHubRunStatus
-	for i := range maxIters {
+	for j := range maxIters {
 		if err := ctx.CreateTimer(10 * time.Second).Await(nil); err != nil {
 			return nil, err
 		}
-
-		if err := ctx.CallActivity(FetchGitHubRun, workflow.WithActivityInput(*in.Watch)).Await(&ghRun); err != nil {
+		if err := ctx.CallActivity(FetchGitHubRun, workflow.WithActivityInput(fetchIn)).Await(&ghRun); err != nil {
 			return nil, fmt.Errorf("fetch gh run: %w", err)
 		}
-
-		ctx.SetCustomStatus(fmt.Sprintf("[%d/%d] gh run %d: %s/%s", i+1, maxIters, ghRun.ID, ghRun.Status, ghRun.Conclusion))
-
+		ctx.SetCustomStatus(fmt.Sprintf("%s gh run %d: %s/%s [%d/%d]", label, ghRun.ID, ghRun.Status, ghRun.Conclusion, j+1, maxIters))
 		if ghRun.Status == "completed" {
-			result.GitHubRun = &ghRun
 			if ghRun.Conclusion != "success" {
-				return &result, fmt.Errorf("gh workflow %s → %s (%s)", in.Watch.WorkflowFile, ghRun.Conclusion, ghRun.HTMLURL)
+				return &ghRun, fmt.Errorf("gh workflow %s → %s (%s)", stage.Watch.WorkflowFile, ghRun.Conclusion, ghRun.HTMLURL)
 			}
-
-			// Auto-merge if configured.
-			if in.Watch.Merge != nil && in.Watch.Merge.Enabled {
-				ctx.SetCustomStatus(fmt.Sprintf("merging PR for branch %s", in.Watch.Branch))
-				method := in.Watch.Merge.Method
-				if method == "" {
-					method = "squash"
-				}
-				var merged MergeResult
-				mergeIn := MergeInput{
-					Owner:  in.Watch.Owner,
-					Repo:   in.Watch.Repo,
-					Branch: in.Watch.Branch,
-					Method: method,
-				}
-				if err := ctx.CallActivity(MergePullRequest, workflow.WithActivityInput(mergeIn)).Await(&merged); err != nil {
-					return &result, fmt.Errorf("merge PR: %w", err)
-				}
-				result.Merge = &merged
-				ctx.SetCustomStatus(fmt.Sprintf("merged PR #%d (%s)", merged.PRNumber, merged.SHA))
-			}
-			return &result, nil
+			return &ghRun, nil
 		}
 	}
+	return &ghRun, fmt.Errorf("timed out waiting for gh workflow %s", stage.Watch.WorkflowFile)
+}
 
-	return &result, fmt.Errorf("timed out waiting for gh workflow %s on branch %s", in.Watch.WorkflowFile, in.Watch.Branch)
+// resolveValues recursively walks v and replaces strings of the form
+// "${stages.<stageName>.<key>}" with the corresponding entry in exports.
+// Any unmatched placeholder returns an error.
+func resolveValues(v map[string]interface{}, exports map[string]string) (map[string]interface{}, error) {
+	out := make(map[string]interface{}, len(v))
+	for k, val := range v {
+		resolved, err := resolveAny(val, exports)
+		if err != nil {
+			return nil, fmt.Errorf("key %q: %w", k, err)
+		}
+		out[k] = resolved
+	}
+	return out, nil
+}
+
+func resolveAny(v interface{}, exports map[string]string) (interface{}, error) {
+	switch x := v.(type) {
+	case string:
+		return resolveString(x, exports)
+	case []interface{}:
+		out := make([]interface{}, len(x))
+		for i, el := range x {
+			r, err := resolveAny(el, exports)
+			if err != nil {
+				return nil, fmt.Errorf("[%d]: %w", i, err)
+			}
+			out[i] = r
+		}
+		return out, nil
+	case map[string]interface{}:
+		return resolveValues(x, exports)
+	default:
+		return v, nil
+	}
+}
+
+func resolveString(s string, exports map[string]string) (string, error) {
+	const open, close = "${stages.", "}"
+	out := s
+	for {
+		i := strings.Index(out, open)
+		if i < 0 {
+			return out, nil
+		}
+		j := strings.Index(out[i:], close)
+		if j < 0 {
+			return "", fmt.Errorf("unterminated placeholder in %q", s)
+		}
+		key := out[i+len(open) : i+j]
+		val, ok := exports[key]
+		if !ok {
+			return "", fmt.Errorf("unknown export %q (have: %v)", key, mapKeys(exports))
+		}
+		out = out[:i] + val + out[i+j+len(close):]
+	}
+}
+
+func mapKeys(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ACTIVITIES
 // ─────────────────────────────────────────────────────────────────────────────
 
+type ScaffolderInput struct {
+	BackstageURL string                 `json:"backstageURL"`
+	AuthToken    string                 `json:"authToken"`
+	TemplateRef  string                 `json:"templateRef"`
+	Values       map[string]interface{} `json:"values"`
+	DryRun       bool                   `json:"dryRun"`
+}
+
 type ScaffolderResult struct {
-	TaskID      string           `json:"taskId"`
-	FinalStatus string           `json:"finalStatus,omitempty"`
-	LogURL      string           `json:"logUrl"`
-	DryRun      bool             `json:"dryRun"`
-	GitHubRun   *GitHubRunStatus `json:"githubRun,omitempty"`
-	Merge       *MergeResult     `json:"merge,omitempty"`
+	TaskID       string `json:"taskId"`
+	LogURL       string `json:"logUrl"`
+	DryRun       bool   `json:"dryRun"`
+	DispatchedAt string `json:"dispatchedAt"` // RFC3339, used by dispatch-kind correlation
+}
+
+type StageResult struct {
+	Name       string            `json:"name"`
+	TaskID     string            `json:"taskId"`
+	LogURL     string            `json:"logUrl"`
+	DryRun     bool              `json:"dryRun"`
+	TaskStatus string            `json:"taskStatus,omitempty"`
+	GitHubRun  *GitHubRunStatus  `json:"githubRun,omitempty"`
+	Merge      *MergeResult      `json:"merge,omitempty"`
+	Exports    map[string]string `json:"exports,omitempty"`
 }
 
 type MergeInput struct {
@@ -195,14 +355,41 @@ type MergeResult struct {
 
 type GitHubRunStatus struct {
 	ID         int64  `json:"id"`
-	Status     string `json:"status"`     // queued | in_progress | completed
-	Conclusion string `json:"conclusion"` // success | failure | cancelled | ...
+	Status     string `json:"status"`
+	Conclusion string `json:"conclusion"`
 	HTMLURL    string `json:"htmlUrl"`
 	HeadBranch string `json:"headBranch"`
 }
 
+type PollInput struct {
+	BackstageURL string `json:"backstageURL"`
+	TaskID       string `json:"taskId"`
+	AuthToken    string `json:"authToken"`
+}
+
+type TaskStatus struct {
+	Status     string `json:"status"`
+	FailedStep string `json:"failedStep"`
+}
+
+type FetchRunInput struct {
+	Kind         string `json:"kind"`
+	Owner        string `json:"owner"`
+	Repo         string `json:"repo"`
+	WorkflowFile string `json:"workflowFile"`
+	Branch       string `json:"branch"`
+	DispatchedAt string `json:"dispatchedAt"`
+}
+
+type FetchExportsInput struct {
+	Owner   string            `json:"owner"`
+	Repo    string            `json:"repo"`
+	RunID   int64             `json:"runId"`
+	Exports map[string]string `json:"exports"`
+}
+
 func CallScaffolder(ctx workflow.ActivityContext) (any, error) {
-	var in Input
+	var in ScaffolderInput
 	if err := ctx.GetInput(&in); err != nil {
 		return nil, fmt.Errorf("get input: %w", err)
 	}
@@ -210,19 +397,19 @@ func CallScaffolder(ctx workflow.ActivityContext) (any, error) {
 		in.AuthToken = os.Getenv("BACKSTAGE_AUTH_TOKEN")
 	}
 
-	url := in.BackstageURL + "/api/scaffolder/v2/tasks"
+	dispatchedAt := time.Now().UTC().Format(time.RFC3339)
+
+	apiURL := in.BackstageURL + "/api/scaffolder/v2/tasks"
 	payload := map[string]interface{}{
 		"templateRef": in.TemplateRef,
 		"values":      in.Values,
 	}
 	if in.DryRun {
-		// Backstage's /dry-run endpoint requires the full template entity inline.
-		// Fetch it from the catalog first.
 		tmpl, err := fetchTemplateEntity(in.BackstageURL, in.TemplateRef, in.AuthToken)
 		if err != nil {
 			return nil, fmt.Errorf("fetch template: %w", err)
 		}
-		url = in.BackstageURL + "/api/scaffolder/v2/dry-run"
+		apiURL = in.BackstageURL + "/api/scaffolder/v2/dry-run"
 		payload = map[string]interface{}{
 			"template":          tmpl,
 			"values":            in.Values,
@@ -232,7 +419,7 @@ func CallScaffolder(ctx workflow.ActivityContext) (any, error) {
 	}
 	body, _ := json.Marshal(payload)
 
-	req, err := http.NewRequest(http.MethodPost, url, strings.NewReader(string(body)))
+	req, err := http.NewRequest(http.MethodPost, apiURL, strings.NewReader(string(body)))
 	if err != nil {
 		return nil, err
 	}
@@ -243,7 +430,7 @@ func CallScaffolder(ctx workflow.ActivityContext) (any, error) {
 
 	resp, err := backstageClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("POST %s: %w", url, err)
+		return nil, fmt.Errorf("POST %s: %w", apiURL, err)
 	}
 	defer resp.Body.Close()
 
@@ -253,13 +440,8 @@ func CallScaffolder(ctx workflow.ActivityContext) (any, error) {
 	}
 
 	if in.DryRun {
-		// dry-run endpoint returns rendered output, no task ID
 		slog.Info("scaffolder dry-run completed", "bytes", len(raw))
-		return &ScaffolderResult{
-			TaskID:      "dry-run",
-			FinalStatus: "completed",
-			DryRun:      true,
-		}, nil
+		return &ScaffolderResult{TaskID: "dry-run", DryRun: true, DispatchedAt: dispatchedAt}, nil
 	}
 
 	var parsed struct {
@@ -275,16 +457,13 @@ func CallScaffolder(ctx workflow.ActivityContext) (any, error) {
 	)
 
 	return &ScaffolderResult{
-		TaskID: parsed.ID,
-		LogURL: fmt.Sprintf("%s/create/tasks/%s", in.BackstageURL, parsed.ID),
-		DryRun: false,
+		TaskID:       parsed.ID,
+		LogURL:       fmt.Sprintf("%s/create/tasks/%s", in.BackstageURL, parsed.ID),
+		DispatchedAt: dispatchedAt,
 	}, nil
 }
 
-// fetchTemplateEntity loads a template from the Backstage catalog by ref
-// (e.g. "template:default/flux-bootstrap") and returns its parsed JSON object.
 func fetchTemplateEntity(baseURL, ref, token string) (map[string]interface{}, error) {
-	// templateRef format: "<kind>:<namespace>/<name>"
 	kindRest := strings.SplitN(ref, ":", 2)
 	if len(kindRest) != 2 {
 		return nil, fmt.Errorf("invalid templateRef %q", ref)
@@ -294,9 +473,9 @@ func fetchTemplateEntity(baseURL, ref, token string) (map[string]interface{}, er
 	if len(nsName) != 2 {
 		return nil, fmt.Errorf("invalid templateRef %q", ref)
 	}
-	url := fmt.Sprintf("%s/api/catalog/entities/by-name/%s/%s/%s", baseURL, kind, nsName[0], nsName[1])
+	apiURL := fmt.Sprintf("%s/api/catalog/entities/by-name/%s/%s/%s", baseURL, kind, nsName[0], nsName[1])
 
-	req, _ := http.NewRequest(http.MethodGet, url, nil)
+	req, _ := http.NewRequest(http.MethodGet, apiURL, nil)
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
@@ -314,17 +493,6 @@ func fetchTemplateEntity(baseURL, ref, token string) (map[string]interface{}, er
 		return nil, err
 	}
 	return entity, nil
-}
-
-type PollInput struct {
-	BackstageURL string `json:"backstageURL"`
-	TaskID       string `json:"taskId"`
-	AuthToken    string `json:"authToken"`
-}
-
-type TaskStatus struct {
-	Status     string `json:"status"`
-	FailedStep string `json:"failedStep"`
 }
 
 func PollTask(ctx workflow.ActivityContext) (any, error) {
@@ -376,10 +544,13 @@ func PollTask(ctx workflow.ActivityContext) (any, error) {
 	return ts, nil
 }
 
-// FetchGitHubRun queries the latest workflow run for the given branch and
-// returns its current status. The workflow polls this until status="completed".
+// FetchGitHubRun returns the most recent matching workflow run for the watch.
+// For kind=pr (default) it filters by head branch and skips initial "skipped"
+// runs from the label-driven re-trigger pattern.
+// For kind=dispatch it filters by event=workflow_dispatch and picks the newest
+// run created at or after DispatchedAt (with a 30s clock-skew buffer).
 func FetchGitHubRun(ctx workflow.ActivityContext) (any, error) {
-	var w GitHubWatch
+	var w FetchRunInput
 	if err := ctx.GetInput(&w); err != nil {
 		return nil, fmt.Errorf("get input: %w", err)
 	}
@@ -389,10 +560,22 @@ func FetchGitHubRun(ctx workflow.ActivityContext) (any, error) {
 		return nil, fmt.Errorf("GITHUB_TOKEN env var not set in worker process")
 	}
 
-	apiURL := fmt.Sprintf(
-		"https://api.github.com/repos/%s/%s/actions/workflows/%s/runs?branch=%s&per_page=5",
-		w.Owner, w.Repo, w.WorkflowFile, url.QueryEscape(w.Branch),
-	)
+	var apiURL string
+	switch w.Kind {
+	case "", "pr":
+		apiURL = fmt.Sprintf(
+			"https://api.github.com/repos/%s/%s/actions/workflows/%s/runs?branch=%s&per_page=5",
+			w.Owner, w.Repo, w.WorkflowFile, url.QueryEscape(w.Branch),
+		)
+	case "dispatch":
+		apiURL = fmt.Sprintf(
+			"https://api.github.com/repos/%s/%s/actions/workflows/%s/runs?event=workflow_dispatch&per_page=10",
+			w.Owner, w.Repo, w.WorkflowFile,
+		)
+	default:
+		return nil, fmt.Errorf("unknown watch kind %q", w.Kind)
+	}
+
 	req, _ := http.NewRequest(http.MethodGet, apiURL, nil)
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -415,6 +598,7 @@ func FetchGitHubRun(ctx workflow.ActivityContext) (any, error) {
 			Conclusion string `json:"conclusion"`
 			HTMLURL    string `json:"html_url"`
 			HeadBranch string `json:"head_branch"`
+			Event      string `json:"event"`
 			CreatedAt  string `json:"created_at"`
 		} `json:"workflow_runs"`
 	}
@@ -422,41 +606,45 @@ func FetchGitHubRun(ctx workflow.ActivityContext) (any, error) {
 		return nil, err
 	}
 
-	// API returns most recent first. Skip runs that completed with conclusion
-	// "skipped" — pr-vm-deploy.yaml fires on PR open before labels are applied,
-	// so the first run is always skipped; the real run comes after the label
-	// workflow re-triggers it.
-	var picked *struct {
-		ID         int64  `json:"id"`
-		Status     string `json:"status"`
-		Conclusion string `json:"conclusion"`
-		HTMLURL    string `json:"html_url"`
-		HeadBranch string `json:"head_branch"`
-		CreatedAt  string `json:"created_at"`
+	var dispatchedAfter time.Time
+	if w.Kind == "dispatch" && w.DispatchedAt != "" {
+		if t, err := time.Parse(time.RFC3339, w.DispatchedAt); err == nil {
+			dispatchedAfter = t.Add(-30 * time.Second)
+		}
 	}
+
 	for i := range parsed.WorkflowRuns {
 		r := parsed.WorkflowRuns[i]
-		if r.Status == "completed" && r.Conclusion == "skipped" {
-			continue
+		switch w.Kind {
+		case "", "pr":
+			// pr-vm-deploy.yaml fires on PR open before labels are applied —
+			// the first run is skipped; the real run comes after the label
+			// workflow re-triggers it.
+			if r.Status == "completed" && r.Conclusion == "skipped" {
+				continue
+			}
+		case "dispatch":
+			if r.Event != "workflow_dispatch" {
+				continue
+			}
+			if !dispatchedAfter.IsZero() {
+				if t, err := time.Parse(time.RFC3339, r.CreatedAt); err == nil && t.Before(dispatchedAfter) {
+					continue
+				}
+			}
 		}
-		picked = &r
-		break
+		out := &GitHubRunStatus{
+			ID:         r.ID,
+			Status:     r.Status,
+			Conclusion: r.Conclusion,
+			HTMLURL:    r.HTMLURL,
+			HeadBranch: r.HeadBranch,
+		}
+		slog.Info("github run",
+			"id", out.ID, "status", out.Status, "conclusion", out.Conclusion, "url", out.HTMLURL)
+		return out, nil
 	}
-	if picked == nil {
-		// No real run yet — keep polling.
-		return &GitHubRunStatus{Status: "pending", HeadBranch: w.Branch}, nil
-	}
-	r := *picked
-	out := &GitHubRunStatus{
-		ID:         r.ID,
-		Status:     r.Status,
-		Conclusion: r.Conclusion,
-		HTMLURL:    r.HTMLURL,
-		HeadBranch: r.HeadBranch,
-	}
-	slog.Info("github run",
-		"id", out.ID, "status", out.Status, "conclusion", out.Conclusion, "url", out.HTMLURL)
-	return out, nil
+	return &GitHubRunStatus{Status: "pending", HeadBranch: w.Branch}, nil
 }
 
 // MergePullRequest finds the open PR for the given branch and merges it.
@@ -471,7 +659,6 @@ func MergePullRequest(ctx workflow.ActivityContext) (any, error) {
 		return nil, fmt.Errorf("GITHUB_TOKEN env var not set in worker process")
 	}
 
-	// 1. Find the open PR for this head branch.
 	listURL := fmt.Sprintf(
 		"https://api.github.com/repos/%s/%s/pulls?head=%s:%s&state=open&per_page=5",
 		in.Owner, in.Repo, in.Owner, in.Branch,
@@ -506,7 +693,6 @@ func MergePullRequest(ctx workflow.ActivityContext) (any, error) {
 	}
 	pr := prs[0]
 
-	// 2. Merge it.
 	mergeURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls/%d/merge", in.Owner, in.Repo, pr.Number)
 	mergeBody, _ := json.Marshal(map[string]string{"merge_method": in.Method})
 	mergeReq, _ := http.NewRequest(http.MethodPut, mergeURL, strings.NewReader(string(mergeBody)))
@@ -543,6 +729,19 @@ func MergePullRequest(ctx workflow.ActivityContext) (any, error) {
 	}, nil
 }
 
+// FetchStageExports resolves a stage's `exports` map into concrete values.
+// NOT YET IMPLEMENTED — see issue #21. The original plan called for GitHub job
+// outputs, but those are not exposed via REST; we'll switch to artifact-based
+// transport (artifact contains outputs.json with a flat string map).
+// Until that is wired up, callers should leave `exports` empty.
+func FetchStageExports(ctx workflow.ActivityContext) (any, error) {
+	var in FetchExportsInput
+	if err := ctx.GetInput(&in); err != nil {
+		return nil, fmt.Errorf("get input: %w", err)
+	}
+	return nil, fmt.Errorf("FetchStageExports not implemented (run %d, %d exports requested) — see issue #21", in.RunID, len(in.Exports))
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // MAIN
 // ─────────────────────────────────────────────────────────────────────────────
@@ -556,17 +755,17 @@ func main() {
 	if err := r.AddWorkflowN("BackstageTemplateWorkflow", BackstageTemplateWorkflow); err != nil {
 		log.Fatalf("register workflow: %v", err)
 	}
-	if err := r.AddActivityN("CallScaffolder", CallScaffolder); err != nil {
-		log.Fatalf("register CallScaffolder: %v", err)
+	activities := map[string]workflow.Activity{
+		"CallScaffolder":    CallScaffolder,
+		"PollTask":          PollTask,
+		"FetchGitHubRun":    FetchGitHubRun,
+		"MergePullRequest":  MergePullRequest,
+		"FetchStageExports": FetchStageExports,
 	}
-	if err := r.AddActivityN("PollTask", PollTask); err != nil {
-		log.Fatalf("register PollTask: %v", err)
-	}
-	if err := r.AddActivityN("FetchGitHubRun", FetchGitHubRun); err != nil {
-		log.Fatalf("register FetchGitHubRun: %v", err)
-	}
-	if err := r.AddActivityN("MergePullRequest", MergePullRequest); err != nil {
-		log.Fatalf("register MergePullRequest: %v", err)
+	for name, fn := range activities {
+		if err := r.AddActivityN(name, fn); err != nil {
+			log.Fatalf("register %s: %v", name, err)
+		}
 	}
 
 	wfClient, err := dapr.NewWorkflowClient()

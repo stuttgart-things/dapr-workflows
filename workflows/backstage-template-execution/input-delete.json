@@ -7,7 +7,7 @@
       "values": {
         "cloud": "proxmox",
         "lab": "labul",
-        "vmname": "dapr-vm-20260425",
+        "vmname": "dapr-vm-20260426",
         "branch": "main",
         "confirmation": true
       },
@@ -16,7 +16,7 @@
         "owner": "stuttgart-things",
         "repo": "stuttgart-things",
         "workflowFile": "pr-vm-deploy.yaml",
-        "branch": "delete-vm/proxmox-labul-dapr-vm-20260425",
+        "branch": "delete-vm/proxmox-labul-dapr-vm-20260426",
         "timeoutMin": 30,
         "merge": {
           "enabled": true,

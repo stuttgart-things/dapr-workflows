@@ -46,8 +46,8 @@
           "ansible.netcommon:8.5.0"
         ],
         "sthings_collections": [
-          "https://github.com/stuttgart-things/ansible/releases/download/sthings-baseos-26.4.562.tar.gz/sthings-baseos-26.4.562.tar.gz",
-          "https://github.com/stuttgart-things/ansible/releases/download/sthings-container-26.4.562.tar.gz/sthings-container-26.4.562.tar.gz"
+          "https://github.com/stuttgart-things/ansible/releases/download/sthings-baseos-26.0.633.tar.gz/sthings-baseos-26.0.633.tar.gz",
+          "https://github.com/stuttgart-things/ansible/releases/download/sthings-container-26.0.633.tar.gz/sthings-container-26.0.633.tar.gz"
         ],
         "custom_collections": []
       },

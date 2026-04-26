@@ -60,7 +60,11 @@ type StageWatch struct {
 	WorkflowFile string       `json:"workflowFile"`
 	Branch       string       `json:"branch,omitempty"` // only meaningful for kind=pr
 	TimeoutMin   int          `json:"timeoutMin"`
-	Merge        *MergeConfig `json:"merge,omitempty"` // only honored for kind=pr
+	// ConfirmFailurePolls is the number of consecutive completed/non-success
+	// observations required before treating the GH run as a real failure.
+	// Defaults to defaultConfirmFailurePolls (≈ 5 min at 10s polling) when 0.
+	ConfirmFailurePolls int          `json:"confirmFailurePolls,omitempty"`
+	Merge               *MergeConfig `json:"merge,omitempty"` // only honored for kind=pr
 }
 
 type MergeConfig struct {
@@ -207,15 +211,30 @@ func BackstageTemplateWorkflow(ctx *workflow.WorkflowContext) (any, error) {
 	return results, nil
 }
 
+// defaultConfirmFailurePolls is the fallback number of consecutive
+// completed/non-success observations required before watchGHRun treats
+// the run as a real failure. stuttgart-things has automation that re-runs
+// failed jobs (label workflows, retry actions); observed gaps between
+// transient failure and re-run start are up to ~5 min, so we default to
+// 30 polls (≈ 5 min at 10s polling). Override per stage via
+// StageWatch.ConfirmFailurePolls.
+const defaultConfirmFailurePolls = 30
+
 // watchGHRun polls FetchGitHubRun until the run reaches a terminal state.
 // Returns the final status (non-nil if a run was ever found) and an error
-// if the run failed or polling timed out.
+// if the run failed or polling timed out. Failures must be observed
+// confirmFailurePolls times in a row before propagating; this absorbs
+// transient completed/failure → re-run → completed/success transitions.
 func watchGHRun(ctx *workflow.WorkflowContext, label string, stage Stage, dispatchedAt string) (*GitHubRunStatus, error) {
 	timeoutMin := stage.Watch.TimeoutMin
 	if timeoutMin <= 0 {
 		timeoutMin = 30
 	}
 	maxIters := (timeoutMin * 60) / 10
+	confirmFailurePolls := stage.Watch.ConfirmFailurePolls
+	if confirmFailurePolls <= 0 {
+		confirmFailurePolls = defaultConfirmFailurePolls
+	}
 	ctx.SetCustomStatus(fmt.Sprintf("%s waiting for %s (%s)", label, stage.Watch.WorkflowFile, stage.Watch.Kind))
 
 	fetchIn := FetchRunInput{
@@ -228,6 +247,7 @@ func watchGHRun(ctx *workflow.WorkflowContext, label string, stage Stage, dispat
 	}
 
 	var ghRun GitHubRunStatus
+	failureStreak := 0
 	for j := range maxIters {
 		if err := ctx.CreateTimer(10 * time.Second).Await(nil); err != nil {
 			return nil, err
@@ -235,12 +255,26 @@ func watchGHRun(ctx *workflow.WorkflowContext, label string, stage Stage, dispat
 		if err := ctx.CallActivity(FetchGitHubRun, workflow.WithActivityInput(fetchIn)).Await(&ghRun); err != nil {
 			return nil, fmt.Errorf("fetch gh run: %w", err)
 		}
-		ctx.SetCustomStatus(fmt.Sprintf("%s gh run %d: %s/%s [%d/%d]", label, ghRun.ID, ghRun.Status, ghRun.Conclusion, j+1, maxIters))
-		if ghRun.Status == "completed" {
-			if ghRun.Conclusion != "success" {
-				return &ghRun, fmt.Errorf("gh workflow %s → %s (%s)", stage.Watch.WorkflowFile, ghRun.Conclusion, ghRun.HTMLURL)
-			}
+
+		switch {
+		case ghRun.Status == "completed" && ghRun.Conclusion == "success":
+			ctx.SetCustomStatus(fmt.Sprintf("%s gh run %d: completed/success [%d/%d]", label, ghRun.ID, j+1, maxIters))
 			return &ghRun, nil
+
+		case ghRun.Status == "completed" && ghRun.Conclusion != "":
+			failureStreak++
+			ctx.SetCustomStatus(fmt.Sprintf(
+				"%s gh run %d: %s/%s [%d/%d] (confirming %d/%d)",
+				label, ghRun.ID, ghRun.Status, ghRun.Conclusion, j+1, maxIters, failureStreak, confirmFailurePolls))
+			if failureStreak >= confirmFailurePolls {
+				return &ghRun, fmt.Errorf("gh workflow %s → %s after %d confirmations (%s)",
+					stage.Watch.WorkflowFile, ghRun.Conclusion, failureStreak, ghRun.HTMLURL)
+			}
+
+		default:
+			// queued / in_progress / pending — re-run is in flight, drop the streak.
+			failureStreak = 0
+			ctx.SetCustomStatus(fmt.Sprintf("%s gh run %d: %s/%s [%d/%d]", label, ghRun.ID, ghRun.Status, ghRun.Conclusion, j+1, maxIters))
 		}
 	}
 	return &ghRun, fmt.Errorf("timed out waiting for gh workflow %s", stage.Watch.WorkflowFile)
@@ -632,7 +666,7 @@ func FetchGitHubRun(ctx workflow.ActivityContext) (any, error) {
 	}
 
 	var dispatchedAfter time.Time
-	if w.Kind == "dispatch" && w.DispatchedAt != "" {
+	if w.DispatchedAt != "" {
 		if t, err := time.Parse(time.RFC3339, w.DispatchedAt); err == nil {
 			dispatchedAfter = t.Add(-30 * time.Second)
 		}
@@ -640,6 +674,14 @@ func FetchGitHubRun(ctx workflow.ActivityContext) (any, error) {
 
 	for i := range parsed.WorkflowRuns {
 		r := parsed.WorkflowRuns[i]
+		// Reused branch names (e.g. after a previous PR was merged + re-created)
+		// surface stale completed runs in the API response. Drop anything that
+		// predates this stage's scaffolder dispatch.
+		if !dispatchedAfter.IsZero() {
+			if t, err := time.Parse(time.RFC3339, r.CreatedAt); err == nil && t.Before(dispatchedAfter) {
+				continue
+			}
+		}
 		switch w.Kind {
 		case "", "pr":
 			// pr-vm-deploy.yaml fires on PR open before labels are applied —
@@ -651,11 +693,6 @@ func FetchGitHubRun(ctx workflow.ActivityContext) (any, error) {
 		case "dispatch":
 			if r.Event != "workflow_dispatch" {
 				continue
-			}
-			if !dispatchedAfter.IsZero() {
-				if t, err := time.Parse(time.RFC3339, r.CreatedAt); err == nil && t.Before(dispatchedAfter) {
-					continue
-				}
 			}
 		}
 		out := &GitHubRunStatus{

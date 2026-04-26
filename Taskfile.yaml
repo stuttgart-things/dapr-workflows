@@ -168,7 +168,7 @@ tasks:
         fi
 
   trigger:
-    desc: Pick a workflow + input.json via gum, prompt for DAPR_HTTP_PORT and run ./run.sh
+    desc: Pick a workflow + input-*.json via gum, prompt for DAPR_HTTP_PORT and run ./run.sh
     cmds:
       - |
         if ! command -v gum &> /dev/null; then
@@ -210,7 +210,7 @@ tasks:
     cmds:
       - |
         echo "Starting dapr run — app={{ .APP_ID }} http={{ .HTTP_PORT }} grpc={{ .GRPC_PORT }}"
-        echo "Shell 2: export DAPR_HTTP_PORT={{ .HTTP_PORT }} && ./run.sh <input.json>"
+        echo "Shell 2: export DAPR_HTTP_PORT={{ .HTTP_PORT }} && ./run.sh <input-*.json>"
         dapr run \
           --app-id {{ .APP_ID }} \
           --app-protocol grpc \

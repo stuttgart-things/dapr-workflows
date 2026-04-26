@@ -91,11 +91,11 @@ and reuse the repo's `run.sh`:
 ```bash
 kubectl -n backstage-workflows port-forward deploy/backstage-template-execution 3500:3500
 cd ..    # back to backstage-template-execution/
-./run.sh input.json
+./run.sh input-vm-only.json
 ./run.sh status <instanceId>
 ```
 
-`input.json` can omit `authToken` — the worker falls back to
+The `input-*.json` files can omit `authToken` — the worker falls back to
 `BACKSTAGE_AUTH_TOKEN` from the mounted Secret.
 
 ## Prerequisites

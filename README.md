@@ -22,7 +22,14 @@ End-to-end orchestration around a Backstage scaffolder template:
 3. Optionally poll a GitHub Actions workflow run on a deterministic branch (the activity skips runs that completed with conclusion `skipped`, e.g. PRs that fired before labels were applied)
 4. Optionally squash/merge/rebase-merge the PR once the GH run reaches `success`
 
-Inputs are passed as JSON; the worker reads `GITHUB_TOKEN` from its environment for the GH-watch + merge activities. See [`backstage-template-execution/input.json`](backstage-template-execution/input.json) (create flow) and [`backstage-template-execution/input-delete.json`](backstage-template-execution/input-delete.json) (delete flow) for examples wired against the `create-terraform-vm` and `delete-terraform-vm` Backstage templates.
+Inputs are passed as JSON; the worker reads `GITHUB_TOKEN` from its environment for the GH-watch + merge activities. The available examples in [`backstage-template-execution/`](workflows/backstage-template-execution) are:
+
+| File | Stages | Backstage templates |
+|------|--------|---------------------|
+| `input-vm-only.json` | VM | `create-terraform-vm` |
+| `input-vm-ansible.json` | VM → Ansible | `create-terraform-vm`, `ansible-provisioning` |
+| `input-ansible-only.json` | Ansible (against an existing target) | `ansible-provisioning` |
+| `input-vm-delete.json` | VM delete | `delete-terraform-vm` |
 
 ```bash
 cd backstage-template-execution
@@ -31,8 +38,9 @@ export GITHUB_TOKEN=...         # PAT with repo scope (actions:read + pull_reque
 dapr run --app-id backstage-tpl --dapr-http-port 3500 -- go run .
 
 # in another terminal
-./run.sh                  # uses input.json
-./run.sh input-delete.json
+./run.sh                       # uses input-vm-only.json
+./run.sh input-vm-ansible.json
+./run.sh input-vm-delete.json
 ./run.sh status <id>
 ```
 

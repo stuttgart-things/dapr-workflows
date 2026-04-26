@@ -58,7 +58,7 @@ Notes:
 
 ### Shell 2 — trigger a run
 
-`run.sh` posts `input.json` to the sidecar's workflow API and then polls the
+`run.sh` posts `input-vm-only.json` (default) to the sidecar's workflow API and then polls the
 instance until it reaches a terminal state.
 
 ```bash
@@ -67,12 +67,14 @@ cd backstage-template-execution
 # Must match --dapr-http-port used in shell 1
 export DAPR_HTTP_PORT=3510
 
-./run.sh                     # uses input.json (create VM)
-./run.sh input-delete.json   # delete VM via delete-terraform-vm template
-./run.sh status run-<ts>     # re-check a previous instance
+./run.sh                          # uses input-vm-only.json (create VM)
+./run.sh input-vm-ansible.json    # VM + Ansible chain
+./run.sh input-ansible-only.json  # Ansible against an existing target
+./run.sh input-vm-delete.json     # delete VM via delete-terraform-vm template
+./run.sh status run-<ts>          # re-check a previous instance
 ```
 
-Edit `input.json` / `input-delete.json` to change the target template,
+Edit any of the `input-*.json` files to change the target template,
 `values`, and the `watch.branch` that the workflow tails on GitHub Actions.
 
 Note: neither `GITHUB_TOKEN` nor `BACKSTAGE_AUTH_TOKEN` are needed in shell 2.

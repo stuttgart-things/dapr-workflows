@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Usage:
-#   ./run.sh              → trigger with input.json, then poll until done
-#   ./run.sh status <id>  → check status of a previous run
+#   ./run.sh                       → trigger with input-vm-only.json, then poll until done
+#   ./run.sh <inputs.json>         → trigger with the given input file
+#   ./run.sh status <id>           → check status of a previous run
 
 set -euo pipefail
 
@@ -36,7 +37,7 @@ if err:
 fi
 
 # ── trigger ───────────────────────────────────────────────────────────────────
-INPUT_FILE=${1:-input.json}
+INPUT_FILE=${1:-input-vm-only.json}
 [[ -f "$INPUT_FILE" ]] || { echo "input file not found: $INPUT_FILE"; exit 1; }
 
 # Substitute env vars in the JSON ($DAPR_SERVICE_TOKEN etc.)

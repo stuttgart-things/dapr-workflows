@@ -1,0 +1,134 @@
+{
+  "backstageURL": "https://backstage.platform.sthings-vsphere.labul.sva.de",
+  "stages": [
+    {
+      "name": "vm",
+      "templateRef": "template:default/create-terraform-vm",
+      "values": {
+        "lab": "LabUL",
+        "cloud": "proxmox",
+        "vm_count": "1",
+        "vm_name": "dapr-vm-20260426",
+        "vm_sizing": "small",
+        "vm_num_cpus": "2",
+        "vm_memory": "4096",
+        "vm_disk_size": "64",
+        "module_source": "github.com/stuttgart-things/proxmox-vm?ref=3.0.2-rc08-20260407",
+        "vm_template": "ubuntu24",
+        "vm_firmware": "seabios",
+        "pve_folder_path": "stuttgart-things",
+        "pve_api_url": "https://ul-pve01.labul.sva.de:8006/api2/json",
+        "pve_cluster_node": "ul-pve01",
+        "pve_datastore": "V5010-01-1",
+        "pve_network": "vmbr0",
+        "vault_secret": "proxmox-labul",
+        "secrets_mode": "sops",
+        "s3_endpoint": "https://artifacts.demo-infra.sthings-vsphere.labul.sva.de",
+        "s3_bucket": "state",
+        "s3_region": "main",
+        "provisioning_profile": "baseos",
+        "baseos_manage_filesystem": true,
+        "baseos_update_packages": true,
+        "baseos_install_requirements": true,
+        "baseos_install_motd": true,
+        "baseos_username": "sthings",
+        "baseos_lvm_home_sizing": "15%",
+        "baseos_lvm_root_sizing": "35%",
+        "baseos_lvm_var_sizing": "50%",
+        "ansible_collections": [
+          "community.crypto:3.2.0",
+          "community.general:12.6.0",
+          "ansible.posix:2.1.0",
+          "kubernetes.core:6.4.0",
+          "community.docker:5.2.0",
+          "awx.awx:24.6.1",
+          "community.hashi_vault:7.1.0",
+          "ansible.netcommon:8.5.0"
+        ],
+        "sthings_collections": [
+          "https://github.com/stuttgart-things/ansible/releases/download/sthings-baseos-26.4.562.tar.gz/sthings-baseos-26.4.562.tar.gz"
+        ],
+        "custom_collections": [],
+        "export_and_encrypt": false
+      },
+      "watch": {
+        "kind": "pr",
+        "owner": "stuttgart-things",
+        "repo": "stuttgart-things",
+        "workflowFile": "pr-vm-deploy.yaml",
+        "branch": "proxmox-vm-dapr-vm-20260426-labul",
+        "timeoutMin": 30,
+        "merge": {
+          "enabled": true,
+          "method": "squash"
+        }
+      },
+      "exports": {
+        "vm_ips": "stage-outputs.vm_ips"
+      }
+    },
+    {
+      "name": "ansible",
+      "templateRef": "template:default/ansible-provisioning",
+      "values": {
+        "provisioning_name": "dapr-vm-20260426",
+        "lab": "labul",
+        "targets": "${stages.vm.vm_ips}",
+        "execute_baseos": true,
+        "manage_filesystem": false,
+        "update_packages": true,
+        "install_requirements": true,
+        "install_motd": true,
+        "reboot_all": false,
+        "username": "sthings",
+        "lvm_home_sizing": "15%",
+        "lvm_root_sizing": "35%",
+        "lvm_var_sizing": "50%",
+        "send_to_homerun": false,
+        "provisioning_type": "kind-cluster",
+        "kind_cluster_name": "dapr-vm-20260426",
+        "kind_ansible_user": "sthings",
+        "kind_version": "0.31.0",
+        "kind_kubectl_version": "1.35.0",
+        "count_worker_nodes": 3,
+        "count_controlplane_nodes": 1,
+        "enable_ingress_ports": true,
+        "enable_host_paths": true,
+        "docker_install_compose": true,
+        "deploy_crossplane_profile": false,
+        "rebuild_kind_cluster": true,
+        "update_kubeconfig_ip": true,
+        "fetch_kubeconfig": false,
+        "fetched_kubeconfig_path": "/tmp/kubeconfig",
+        "export_and_encrypt": false,
+        "ansible_collections": [
+          "community.crypto:3.2.0",
+          "community.general:12.6.0",
+          "ansible.posix:2.1.0",
+          "kubernetes.core:6.4.0",
+          "community.docker:5.2.0",
+          "awx.awx:24.6.1",
+          "community.hashi_vault:7.1.0",
+          "ansible.netcommon:8.5.0"
+        ],
+        "sthings_collections": [
+          "https://github.com/stuttgart-things/ansible/releases/download/sthings-baseos-26.4.562.tar.gz/sthings-baseos-26.4.562.tar.gz",
+          "https://github.com/stuttgart-things/ansible/releases/download/sthings-container-26.4.562.tar.gz/sthings-container-26.4.562.tar.gz"
+        ],
+        "custom_collections": []
+      },
+      "watch": {
+        "kind": "pr",
+        "owner": "stuttgart-things",
+        "repo": "stuttgart-things",
+        "workflowFile": "pr-ansible-provisioning.yaml",
+        "branch": "ansible-provisioning-dapr-vm-20260426-labul",
+        "timeoutMin": 30,
+        "merge": {
+          "enabled": true,
+          "method": "squash"
+        }
+      }
+    }
+  ]
+}

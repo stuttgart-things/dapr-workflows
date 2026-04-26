@@ -1,23 +1,28 @@
 {
   "backstageURL": "https://backstage.platform.sthings-vsphere.labul.sva.de",
-  "templateRef": "template:default/delete-terraform-vm",
-  "dryRun": false,
-  "values": {
-    "cloud": "proxmox",
-    "lab": "labul",
-    "vmname": "dapr-monday-1",
-    "branch": "main",
-    "confirmation": true
-  },
-  "watch": {
-    "owner": "stuttgart-things",
-    "repo": "stuttgart-things",
-    "workflowFile": "pr-vm-deploy.yaml",
-    "branch": "delete-vm/proxmox-labul-dapr-monday-1",
-    "timeoutMin": 30,
-    "merge": {
-      "enabled": true,
-      "method": "squash"
+  "stages": [
+    {
+      "name": "delete-vm",
+      "templateRef": "template:default/delete-terraform-vm",
+      "values": {
+        "cloud": "proxmox",
+        "lab": "labul",
+        "vmname": "dapr-vm-20260425",
+        "branch": "main",
+        "confirmation": true
+      },
+      "watch": {
+        "kind": "pr",
+        "owner": "stuttgart-things",
+        "repo": "stuttgart-things",
+        "workflowFile": "pr-vm-deploy.yaml",
+        "branch": "delete-vm/proxmox-labul-dapr-vm-20260425",
+        "timeoutMin": 30,
+        "merge": {
+          "enabled": true,
+          "method": "squash"
+        }
+      }
     }
-  }
+  ]
 }

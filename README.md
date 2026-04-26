@@ -47,6 +47,33 @@ dapr init
 
 See [docs/setup/dapr-cli.md](docs/setup/dapr-cli.md) for details.
 
+## Taskfile shortcuts
+
+The root [`Taskfile.yaml`](Taskfile.yaml) wraps the most common dev flows so you don't have to remember the exact `dapr run` / `./run.sh` invocations.
+
+| Task | Description |
+|------|-------------|
+| `task do` | Pick any task interactively via `gum choose` and run it |
+| `task run-backstage-tpl` | Start the `backstage-template-execution` worker via `dapr run` (defaults: `HTTP_PORT=3510`, `GRPC_PORT=50011` — override to avoid clashes) |
+| `task trigger` | Pick a workflow + `input*.json` via `gum`, prompt for `DAPR_HTTP_PORT` and run the workflow's `./run.sh` |
+| `task pipeline` | Run the full gosec + ko-build + trivy pipeline on a workflow dir (`SOURCE_CODE_DIR=...`) |
+| `task build` | Interactively pick a workflow + action (gosec / build / pipeline) — requires `gum` |
+| `task security-scan` | Run gosec via Dagger against a workflow dir |
+| `task build-scan-image-ko` | Build, push to `ttl.sh` and trivy-scan a workflow image with `ko` |
+| `task trivy-scan-image` | Trivy-scan an already-pushed image (`IMAGE_REF=...`) |
+
+Typical local dev loop with two shells:
+
+```bash
+# shell 1 — start the worker
+task run-backstage-tpl
+
+# shell 2 — interactively pick + trigger an input
+task trigger
+```
+
+`task trigger` discovers any `workflows/*/run.sh` and lists the matching `input*.json` files for selection.
+
 ## Author
 
 Patrick Hermann, stuttgart-things (2025-2026)

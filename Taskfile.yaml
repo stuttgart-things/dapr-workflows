@@ -12,6 +12,16 @@ vars:
   KO_VERSION: 1c688bd6325d7b041fdc7d1be092f96054c35d39  # pragma: allowlist secret
 
 tasks:
+  do:
+    desc: Select a task to run
+    cmds:
+      - |
+        # Extract task names (keep internal colons, remove only trailing colon)
+        task_name=$(task -l | awk '/^\*/ {print $2}' | sed 's/:$//' | gum choose)
+
+        # Run the selected task
+        [ -n "$task_name" ] && task "$task_name"
+
   default:
     desc: List available tasks
     cmds:
@@ -156,6 +166,57 @@ tasks:
             fi
           fi
         fi
+
+  trigger:
+    desc: Pick a workflow + input.json via gum, prompt for DAPR_HTTP_PORT and run ./run.sh
+    cmds:
+      - |
+        if ! command -v gum &> /dev/null; then
+          echo "gum not found — install from https://github.com/charmbracelet/gum"
+          exit 1
+        fi
+
+        mapfile -t DIRS < <(find workflows -mindepth 2 -maxdepth 2 -name run.sh -printf '%h\n' | sort -u)
+        if [ ${#DIRS[@]} -eq 0 ]; then
+          echo "no workflows with run.sh found under workflows/"
+          exit 1
+        fi
+
+        TARGET=$(printf '%s\n' "${DIRS[@]}" | gum choose --header="Select workflow:")
+        [ -z "$TARGET" ] && { echo "no selection"; exit 1; }
+
+        mapfile -t INPUTS < <(cd "$TARGET" && ls input*.json 2>/dev/null | sort)
+        if [ ${#INPUTS[@]} -eq 0 ]; then
+          echo "no input*.json files found in $TARGET"
+          exit 1
+        fi
+
+        INPUT=$(printf '%s\n' "${INPUTS[@]}" | gum choose --header="Select input file:")
+        [ -z "$INPUT" ] && { echo "no selection"; exit 1; }
+
+        PORT=$(gum input --header="DAPR_HTTP_PORT" --value="3510" --placeholder="3510")
+        [ -z "$PORT" ] && { echo "no port"; exit 1; }
+
+        echo "→ cd $TARGET && DAPR_HTTP_PORT=$PORT ./run.sh $INPUT"
+        cd "$TARGET" && DAPR_HTTP_PORT="$PORT" ./run.sh "$INPUT"
+
+  run-backstage-tpl:
+    desc: Start the backstage-template-execution worker via dapr run (override HTTP_PORT / GRPC_PORT to avoid clashes)
+    dir: workflows/backstage-template-execution
+    vars:
+      APP_ID: '{{ .APP_ID | default "backstage-template-execution" }}'
+      HTTP_PORT: '{{ .HTTP_PORT | default "3510" }}'
+      GRPC_PORT: '{{ .GRPC_PORT | default "50011" }}'
+    cmds:
+      - |
+        echo "Starting dapr run — app={{ .APP_ID }} http={{ .HTTP_PORT }} grpc={{ .GRPC_PORT }}"
+        echo "Shell 2: export DAPR_HTTP_PORT={{ .HTTP_PORT }} && ./run.sh <input.json>"
+        dapr run \
+          --app-id {{ .APP_ID }} \
+          --app-protocol grpc \
+          --dapr-grpc-port {{ .GRPC_PORT }} \
+          --dapr-http-port {{ .HTTP_PORT }} \
+          -- go run .
 
   build:
     desc: Interactively choose a workflow + action (gosec / build / pipeline) — requires gum

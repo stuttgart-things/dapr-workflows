@@ -3,7 +3,7 @@ module github.com/stuttgart-things/dapr-workflows/golden-image-workflow
 go 1.26.0
 
 require (
-	github.com/dapr/durabletask-go v0.11.3
+	github.com/dapr/durabletask-go v0.11.4
 	github.com/dapr/go-sdk v1.14.2
 )
 

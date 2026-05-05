@@ -3,7 +3,7 @@ module github.com/stuttgart-things/dapr-workflows/backstage-template-execution
 go 1.26.2
 
 require (
-	github.com/dapr/durabletask-go v0.11.3
+	github.com/dapr/durabletask-go v0.11.4
 	github.com/dapr/go-sdk v1.14.2
 )
 

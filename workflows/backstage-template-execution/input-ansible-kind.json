@@ -1,0 +1,41 @@
+{
+  "backstageURL": "https://backstage.platform.sthings-vsphere.labul.sva.de",
+  "templateRef": "template:default/ansible-provisioning",
+  "dryRun": false,
+  "values": {
+    "provisioning_name": "xplane-function",
+    "lab": "labul",
+    "targets": ["cd-mgmt-1.labul.sva.de"],
+    "provisioning_type": "kind-cluster",
+    "ansible_collections": [
+      "community.crypto:3.2.0",
+      "community.general:12.6.0",
+      "ansible.posix:2.1.0",
+      "kubernetes.core:6.4.0",
+      "community.docker:5.2.0",
+      "community.vmware:6.2.0",
+      "awx.awx:24.6.1",
+      "community.hashi_vault:7.1.0",
+      "ansible.netcommon:8.5.0"
+    ],
+    "sthings_collections": [
+      "https://github.com/stuttgart-things/ansible/releases/download/sthings-awx-25.4.506.tar.gz/sthings-awx-25.4.506.tar.gz",
+      "https://github.com/stuttgart-things/ansible/releases/download/sthings-rke-26.1.554.tar.gz/sthings-rke-26.1.554.tar.gz",
+      "https://github.com/stuttgart-things/ansible/releases/download/sthings-container-26.6.975.tar.gz/sthings-container-26.6.975.tar.gz",
+      "https://github.com/stuttgart-things/ansible/releases/download/sthings-baseos-26.6.976.tar.gz/sthings-baseos-26.6.976.tar.gz"
+    ],
+    "custom_collections": [],
+    "export_and_encrypt": false
+  },
+  "watch": {
+    "owner": "stuttgart-things",
+    "repo": "stuttgart-things",
+    "workflowFile": "pr-ansible-provisioning.yaml",
+    "branch": "ansible-provisioning-xplane-function-labul",
+    "timeoutMin": 30,
+    "merge": {
+      "enabled": false,
+      "method": "squash"
+    }
+  }
+}

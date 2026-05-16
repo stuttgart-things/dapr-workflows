@@ -33,7 +33,7 @@ export GITHUB_TOKEN='<gh-pat-with-repo-scope>'
 # Optional: skip TLS verification against self-signed Backstage
 export BACKSTAGE_INSECURE_TLS=true
 
-cd backstage-template-execution
+cd workflows/backstage-template-execution   # from repo root
 
 dapr run \
   --app-id backstage-template-execution \
@@ -44,6 +44,28 @@ dapr run \
 ```
 
 Wait for the log line `worker ready — use run.sh to start a workflow`.
+
+#### Verify the Backstage token before starting Dapr
+
+`BACKSTAGE_AUTH_TOKEN` is a **Bearer token validated by Backstage**, sent in
+the `Authorization` header against `/api/scaffolder/v2/...`. It is **not** a
+`DAPR_API_TOKEN` (which would protect the Dapr sidecar's own API and isn't
+used by this worker). The token must come from Backstage — typically a static
+token from `backend.auth.externalAccess[].options.token` in `app-config.yaml`,
+or a JWT issued by Backstage's auth backend.
+
+Smoke-test the token against the catalog before spinning Dapr up — saves a
+round of debugging if the wrong token type was supplied:
+
+```bash
+curl -sS -o /dev/null -w '%{http_code}\n' \
+  -H "Authorization: Bearer $BACKSTAGE_AUTH_TOKEN" \
+  -k https://backstage.platform.sthings-vsphere.labul.sva.de/api/catalog/entities/by-name/template/default/ansible-provisioning
+```
+
+- `200` → token valid, template registered, you're good
+- `401` / `403` → wrong token (not a Backstage token, expired, or lacks catalog/scaffolder permission)
+- `404` → token valid but template not registered under `template:default/ansible-provisioning` at that Backstage URL
 
 Notes:
 
@@ -62,14 +84,15 @@ Notes:
 instance until it reaches a terminal state.
 
 ```bash
-cd backstage-template-execution
+cd workflows/backstage-template-execution   # from repo root
 
 # Must match --dapr-http-port used in shell 1
 export DAPR_HTTP_PORT=3510
 
-./run.sh                     # uses input.json (create VM)
-./run.sh input-delete.json   # delete VM via delete-terraform-vm template
-./run.sh status run-<ts>     # re-check a previous instance
+./run.sh                          # uses input.json (create VM)
+./run.sh input-delete.json        # delete VM via delete-terraform-vm template
+./run.sh input-ansible-kind.json  # dryRun ansible-provisioning (kind-cluster)
+./run.sh status run-<ts>          # re-check a previous instance
 ```
 
 Edit `input.json` / `input-delete.json` to change the target template,
@@ -80,6 +103,110 @@ Both are read by the worker process in shell 1 — `BACKSTAGE_AUTH_TOKEN` is
 used as the fallback when the input JSON's `authToken` field is empty (see
 `main.go:210`), and `GITHUB_TOKEN` is read by the `FetchGitHubRun` /
 `MergePullRequest` activities at run time.
+
+### dryRun semantics
+
+When the input has `"dryRun": true`, the worker:
+
+1. Fetches the template entity from `/api/catalog/entities/by-name/...`
+2. POSTs to `/api/scaffolder/v2/dry-run` with empty `directoryContents`
+3. Returns immediately with `TaskID: "dry-run"` — **no polling, no GitHub
+   Actions watch, no PR merge**
+
+So a dryRun only needs `BACKSTAGE_AUTH_TOKEN`; `GITHUB_TOKEN` is irrelevant.
+And because `directoryContents` is empty, server-side `fetch:template` steps
+that reference `./content` will error — that's expected. The dryRun validates
+auth, template registration, and parameter shape, not a full render.
+
+**Successful dryRun output:**
+
+```
+Started: {"instanceID":"run-..."}
+Watching status (ctrl+c to stop)...
+  HH:MM:SS  RUNNING  dry-run complete: task dry-run
+  HH:MM:SS  COMPLETED  dry-run complete: task dry-run
+
+Status      : COMPLETED
+Output:
+{
+  "taskId": "dry-run",
+  "finalStatus": "completed",
+  "dryRun": true
+}
+```
+
+**Common dryRun failures:**
+
+| Symptom | Likely cause |
+|---|---|
+| `HTTP 401` from Backstage | `BACKSTAGE_AUTH_TOKEN` wrong/expired or lacks scaffolder permission |
+| `HTTP 404 fetch template` | Template not registered at that URL or wrong namespace in `templateRef` |
+| `fetch:template` error inside dry-run | Expected — worker sends empty `directoryContents`. Auth + params validated up to that point |
+| `HTTP 500 ENOENT: ... lstat '/tmp/dry-run-content-.../content'` | Same root cause as the row above, surfaced earlier (during the `fetch:template ./content` step). **Templates with a `fetch:template ./content` step cannot be fully dry-run** by this worker — Backstage tries to `lstat` the unpacked content dir, but `directoryContents` was empty so the dir doesn't exist. The dryRun confirmed auth + template registration; promote to a real run to actually exercise the template. |
+
+> **Practical takeaway:** for any template that uses `fetch:template`
+> (most do — including `ansible-provisioning`), dryRun via this worker only
+> proves "Backstage accepts my token and finds the template". To validate
+> parameter rendering, you have to do a real run via `/v2/tasks`. Backstage
+> handles content fetching itself there — the worker doesn't need to bundle
+> anything.
+
+### Gotcha: parameter defaults aren't applied on API calls
+
+Backstage's scaffolder only populates a template's schema `default:` values
+when a user submits the template via the **UI form**. When you call
+`/api/scaffolder/v2/tasks` directly (which this worker does), any parameter
+you omit arrives at the template as **`undefined`**, even if its schema
+declares a default. Nunjucks expressions like
+`{% if "foo" in collections %}` then throw:
+
+```
+Error: Cannot use "in" operator to search for "foo" in unexpected types.
+```
+
+**Always pass every parameter you reference in template content explicitly
+in your `values:` block, even if it just mirrors the schema default.** Easy
+to crib defaults straight out of the template's `template.yaml`. Surfaces in
+the task event log under the failing step.
+
+### Inspecting a failed task
+
+`run.sh` only surfaces the worker's own error string, which can be terse
+(e.g. `task <id> → failed (step: )`). The full event stream — including
+each step's stdout and the rendering engine's stack trace — lives in
+Backstage. Two ways to get it:
+
+- **UI:** `<backstageURL>/create/tasks/<taskId>`
+- **API** (handy for grepping):
+
+```bash
+curl -sS -k \
+  -H "Authorization: Bearer $BACKSTAGE_AUTH_TOKEN" \
+  "$BACKSTAGE_URL/api/scaffolder/v2/tasks/<taskId>/events" \
+  | jq -r '.[] | "[\(.type)] step=\(.body.stepId // "-") \(.body.message // "")"'
+```
+
+### Promoting a dryRun to a real run
+
+1. Edit the input file: `"dryRun": false`
+2. If you want auto-merge of the resulting PR: `"watch": { ..., "merge": { "enabled": true, "method": "squash" } }`
+3. Confirm `watch.workflowFile` matches the GitHub Actions workflow that fires on the PR branch (for `ansible-provisioning-*` branches in `stuttgart-things/stuttgart-things`, that's `pr-ansible-provisioning.yaml`)
+4. Re-run `./run.sh <input-file>`
+
+### Token hygiene
+
+`BACKSTAGE_AUTH_TOKEN` and `GITHUB_TOKEN` end up in the shell history of the
+worker shell. To keep them out:
+
+```bash
+export HISTCONTROL=ignorespace
+ export BACKSTAGE_AUTH_TOKEN='...'   # leading space → not recorded
+ export GITHUB_TOKEN='...'
+```
+
+Or source them from a file outside the repo (e.g. `source ~/.envrc.backstage`).
+Rotate both tokens immediately if they're ever pasted into a chat, logs, or
+a PR description.
 
 ## Required environment variables
 

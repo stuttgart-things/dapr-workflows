@@ -11,8 +11,16 @@ port, and no liveness/readiness probe** in this deployment.
 
 | File       | Purpose                                       |
 |------------|-----------------------------------------------|
-| `kcl.mod`  | KCL package with `k8s` schema dependency      |
-| `main.k`   | All manifests as a single YAML stream         |
+| `kcl.mod`  | KCL package — depends on `k8s` + the repo-local `deploy_base` shared module (`../../../deploy-base`) |
+| `main.k`   | Thin composer — imports `deploy_base.{worker,statestore,secrets,ca}`, declares identity/flags, and emits the final YAML stream |
+
+The heavy lifting (Deployment shape, Dapr `Component`, `Secret` helpers,
+optional CA bundle + matching volume/mount/env) lives in the shared
+[`deploy-base`](../../../deploy-base/README.md) KCL module so future Dapr
+workflows can reuse the same building blocks. `main.k` keeps three
+concerns explicitly separated: **core deployment**, **env/secrets
+wiring**, and **optional CA bundle** — each toggleable via a top-level
+flag.
 
 ## What it renders
 

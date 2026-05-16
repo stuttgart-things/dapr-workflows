@@ -5,3 +5,4 @@ version = "0.1.0"
 
 [dependencies]
 k8s = "1.31.2"
+deploy_base = { path = "../../../deploy-base" }

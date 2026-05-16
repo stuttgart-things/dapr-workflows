@@ -1,8 +1,4 @@
 [dependencies]
-  [dependencies.deploy_base]
-    name = "deploy_base"
-    full_name = "deploy_base_0.1.0"
-    version = "0.1.0"
   [dependencies.k8s]
     name = "k8s"
     full_name = "k8s_1.31.2"

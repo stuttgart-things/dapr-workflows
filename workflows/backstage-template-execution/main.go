@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"time"
 
@@ -486,20 +487,45 @@ func unfinishedChecks(owner, repo, sha, token string) ([]string, error) {
 		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, raw)
 	}
 
+	type checkRun struct {
+		Name       string `json:"name"`
+		Status     string `json:"status"`
+		Conclusion string `json:"conclusion"`
+		StartedAt  string `json:"started_at"`
+	}
 	var parsed struct {
-		TotalCount int `json:"total_count"`
-		CheckRuns  []struct {
-			Name       string `json:"name"`
-			Status     string `json:"status"`
-			Conclusion string `json:"conclusion"`
-		} `json:"check_runs"`
+		TotalCount int        `json:"total_count"`
+		CheckRuns  []checkRun `json:"check_runs"`
 	}
 	if err := json.Unmarshal(raw, &parsed); err != nil {
 		return nil, err
 	}
 
-	var bad []string
+	// KEEP ONLY THE NEWEST RUN PER NAME.
+	//
+	// `filter=latest` (the API default) deduplicates within a check SUITE, not
+	// across them -- and re-running a workflow creates a NEW suite. So a check
+	// that failed, was re-run and went green comes back twice: once failed,
+	// once succeeded. Judging every entry would refuse that merge forever,
+	// which turns "re-run the flaky job" into "the automation is stuck".
+	//
+	// Measured on stuttgart-things@83d6ea08f: 46 check runs, 16 distinct
+	// names, three of them carrying mixed conclusions.
+	//
+	// Keying on the NAME is what GitHub's own required-checks do, and it
+	// inherits their caveat: two different workflows with a same-named job
+	// share one entry, so the newer green one hides the older red one. Both
+	// jobs called `Config` in that measurement -- harmless there (all
+	// skipped/success), worth knowing before naming a job something generic.
+	newest := map[string]checkRun{}
 	for _, c := range parsed.CheckRuns {
+		if prev, ok := newest[c.Name]; !ok || c.StartedAt > prev.StartedAt {
+			newest[c.Name] = c
+		}
+	}
+
+	var bad []string
+	for _, c := range newest {
 		if c.Status != "completed" {
 			bad = append(bad, fmt.Sprintf("%s (%s)", c.Name, c.Status))
 			continue
@@ -510,7 +536,9 @@ func unfinishedChecks(owner, repo, sha, token string) ([]string, error) {
 			bad = append(bad, fmt.Sprintf("%s (%s)", c.Name, c.Conclusion))
 		}
 	}
-	slog.Info("pr head checks", "sha", sha, "total", parsed.TotalCount, "notGreen", len(bad))
+	sort.Strings(bad) // map order is random; a stable message is greppable
+	slog.Info("pr head checks",
+		"sha", sha, "total", parsed.TotalCount, "distinct", len(newest), "notGreen", len(bad))
 	return bad, nil
 }
 

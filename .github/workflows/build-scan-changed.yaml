@@ -32,7 +32,7 @@ jobs:
       dirs: ${{ steps.set.outputs.dirs }}
       any: ${{ steps.set.outputs.any }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 

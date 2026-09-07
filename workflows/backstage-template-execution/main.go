@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"time"
 
@@ -42,11 +43,11 @@ type Input struct {
 }
 
 type GitHubWatch struct {
-	Owner        string      `json:"owner"`
-	Repo         string      `json:"repo"`
-	WorkflowFile string      `json:"workflowFile"`
-	Branch       string      `json:"branch"`
-	TimeoutMin   int         `json:"timeoutMin"`
+	Owner        string       `json:"owner"`
+	Repo         string       `json:"repo"`
+	WorkflowFile string       `json:"workflowFile"`
+	Branch       string       `json:"branch"`
+	TimeoutMin   int          `json:"timeoutMin"`
 	Merge        *MergeConfig `json:"merge,omitempty"`
 }
 
@@ -459,6 +460,88 @@ func FetchGitHubRun(ctx workflow.ActivityContext) (any, error) {
 	return out, nil
 }
 
+// unfinishedChecks names every check run on `sha` that is not a green light:
+// still running, or completed with anything other than success/neutral/skipped.
+// An empty result means the head is clear to merge.
+//
+// `neutral` and `skipped` are green on purpose. A skipped job is the normal
+// state of a conditional workflow -- pr-vm-deploy.yaml alone contributes
+// several -- and treating them as failures would block every merge.
+func unfinishedChecks(owner, repo, sha, token string) ([]string, error) {
+	url := fmt.Sprintf(
+		"https://api.github.com/repos/%s/%s/commits/%s/check-runs?per_page=100",
+		owner, repo, sha,
+	)
+	req, _ := http.NewRequest(http.MethodGet, url, nil)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, raw)
+	}
+
+	type checkRun struct {
+		Name       string `json:"name"`
+		Status     string `json:"status"`
+		Conclusion string `json:"conclusion"`
+		StartedAt  string `json:"started_at"`
+	}
+	var parsed struct {
+		TotalCount int        `json:"total_count"`
+		CheckRuns  []checkRun `json:"check_runs"`
+	}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return nil, err
+	}
+
+	// KEEP ONLY THE NEWEST RUN PER NAME.
+	//
+	// `filter=latest` (the API default) deduplicates within a check SUITE, not
+	// across them -- and re-running a workflow creates a NEW suite. So a check
+	// that failed, was re-run and went green comes back twice: once failed,
+	// once succeeded. Judging every entry would refuse that merge forever,
+	// which turns "re-run the flaky job" into "the automation is stuck".
+	//
+	// Measured on stuttgart-things@83d6ea08f: 46 check runs, 16 distinct
+	// names, three of them carrying mixed conclusions.
+	//
+	// Keying on the NAME is what GitHub's own required-checks do, and it
+	// inherits their caveat: two different workflows with a same-named job
+	// share one entry, so the newer green one hides the older red one. Both
+	// jobs called `Config` in that measurement -- harmless there (all
+	// skipped/success), worth knowing before naming a job something generic.
+	newest := map[string]checkRun{}
+	for _, c := range parsed.CheckRuns {
+		if prev, ok := newest[c.Name]; !ok || c.StartedAt > prev.StartedAt {
+			newest[c.Name] = c
+		}
+	}
+
+	var bad []string
+	for _, c := range newest {
+		if c.Status != "completed" {
+			bad = append(bad, fmt.Sprintf("%s (%s)", c.Name, c.Status))
+			continue
+		}
+		switch c.Conclusion {
+		case "success", "neutral", "skipped":
+		default:
+			bad = append(bad, fmt.Sprintf("%s (%s)", c.Name, c.Conclusion))
+		}
+	}
+	sort.Strings(bad) // map order is random; a stable message is greppable
+	slog.Info("pr head checks",
+		"sha", sha, "total", parsed.TotalCount, "distinct", len(newest), "notGreen", len(bad))
+	return bad, nil
+}
+
 // MergePullRequest finds the open PR for the given branch and merges it.
 func MergePullRequest(ctx workflow.ActivityContext) (any, error) {
 	var in MergeInput
@@ -506,7 +589,31 @@ func MergePullRequest(ctx workflow.ActivityContext) (any, error) {
 	}
 	pr := prs[0]
 
-	// 2. Merge it.
+	// 2. EVERY check on the PR head has to be green, not just the one workflow
+	//    this run watched.
+	//
+	//    Watching a single workflowFile is not a gate. A repository can easily
+	//    have a second workflow that is the real guard, and the two are
+	//    independent: one goes green while the other fails, and merging on the
+	//    first alone lands exactly the change the second rejected.
+	//
+	//    Witnessed on stuttgart-things#2796 (2026-09-07): `pr-vm-deploy.yaml`
+	//    built the VM and reported success while `validate-cluster-components`
+	//    was RED, because the cluster's OpenBao secrets had never been seeded.
+	//    Merging there would have produced a cluster whose External Secrets can
+	//    read nothing -- every package Healthy, every Kustomization Ready, and
+	//    no credentials -- with nobody having seen the failing gate.
+	//
+	//    A check that has not finished counts as not-green. Refusing is cheap
+	//    (a human merges, or re-runs the workflow); merging early is not.
+	if pending, err := unfinishedChecks(in.Owner, in.Repo, pr.Head.SHA, token); err != nil {
+		return nil, fmt.Errorf("check runs for %s: %w", pr.Head.SHA, err)
+	} else if len(pending) > 0 {
+		return nil, fmt.Errorf("refusing to merge PR #%d (%s): %s",
+			pr.Number, pr.HTMLURL, strings.Join(pending, ", "))
+	}
+
+	// 3. Merge it.
 	mergeURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls/%d/merge", in.Owner, in.Repo, pr.Number)
 	mergeBody, _ := json.Marshal(map[string]string{"merge_method": in.Method})
 	mergeReq, _ := http.NewRequest(http.MethodPut, mergeURL, strings.NewReader(string(mergeBody)))

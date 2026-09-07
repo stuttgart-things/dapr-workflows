@@ -8,6 +8,8 @@ github.com/dapr/durabletask-go v0.11.3 h1:DVWfiPo9+Xg0Q3uJIFGvEh2707uNyFKwIoy/PX
 github.com/dapr/durabletask-go v0.11.3/go.mod h1:omLTzNvLQvpemgQYpKpfQGLMLVzDyUxBePRT/UlwqYI=
 github.com/dapr/durabletask-go v0.12.1 h1:CIqG2HJGnU7kRtHICuRSSSO9RdHax99HdvHEaxRGE04=
 github.com/dapr/durabletask-go v0.12.1/go.mod h1:+8ABEQn9JvRPRvPr1QNVxdkdLPgJgpJwcpie5ZDt7nk=
+github.com/dapr/durabletask-go v0.14.1 h1:KPXOmdwj/SLW5ZqNvTFtQXbzVxDe9s8JLKgFqn81oUo=
+github.com/dapr/durabletask-go v0.14.1/go.mod h1:+8ABEQn9JvRPRvPr1QNVxdkdLPgJgpJwcpie5ZDt7nk=
 github.com/dapr/go-sdk v1.14.2 h1:HV44TpxlpoX30LwddTMbiN8aZHwgFKRHI39wp/SzUdE=
 github.com/dapr/go-sdk v1.14.2/go.mod h1:k2A5GrEYXVTlZdTFMRGkzKaLRPP7Rdd6+KcqI674Ud8=
 github.com/dapr/kit v0.17.0 h1:WCltVyKRMwk+3pbBs/3Qe5on4BZUnhy6tKgLObB2nMs=

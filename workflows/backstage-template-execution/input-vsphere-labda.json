@@ -51,7 +51,7 @@
     "repo": "stuttgart-things",
     "workflowFile": "pr-vm-deploy.yaml",
     "branch": "vsphere-vm-dapr-labda-1-labda",
-    "timeoutMin": 30,
+    "timeoutMin": 45,
     "merge": {
       "enabled": true,
       "method": "squash"

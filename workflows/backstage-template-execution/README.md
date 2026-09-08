@@ -249,14 +249,39 @@ Pass `backstageURL` in the input only to override a single run.
 Only the plumbing is lab-agnostic. Values inside `values` name real
 infrastructure and belong to the caller:
 
-| Example | Lab | Note |
+| Example | Lab / cloud | Note |
 |---|---|---|
-| `input-ansible-kind.json` | works anywhere the targets exist | `ansible-provisioning` writes config files only |
-| `input.json` / `create-terraform-vm` | **LabUL only** | `pve_api_url` points at `ul-pve01`; there is no LabDA Proxmox host in this fleet — only `ul-pve*` exists. This example cannot be flipped to LabDA without inventing a host |
+| `input-vsphere-labda.json` | **LabDA / vSphere** | Use this while LabUL is down. Values taken from a real deployed VM (`stuttgart-things/terraform/vsphere/labda/cicd-machinery-test5`) |
+| `input.json` | **LabUL / Proxmox** | `pve_api_url` points at `ul-pve01`. There is no LabDA Proxmox host in this fleet — only `ul-pve*` exists — so this one cannot be flipped |
+| `input-ansible-kind.json` | anywhere the targets exist | `ansible-provisioning` writes config files only |
 
-So a `create-terraform-vm` run needs LabUL up, regardless of which cluster the
-worker runs on. That is a property of Proxmox living in one lab, not of this
-workflow.
+The template itself enforces the split: `LabDA` offers vSphere only, `LabUL`
+offers Proxmox only (`template.yaml`, `dependencies.lab.oneOf`). So the lab
+choice picks the cloud, and the watch branch follows it —
+`vsphere-vm-<name>-labda` vs `proxmox-vm-<name>-labul`.
+
+### Validating an input without building a VM
+
+`create-terraform-vm` has a `fetch:template ./content` step, so a dryRun cannot
+render it (see [dryRun semantics](#dryrun-semantics)) — it confirms auth and
+template registration and nothing about your values. Validate the values
+against the template's own schema instead:
+
+```python
+import yaml, json, jsonschema
+tpl = yaml.safe_load(open("backstage/templates/create-terraform-vm/template.yaml"))
+values = json.load(open("input-vsphere-labda.json"))["values"]
+for g in tpl["spec"]["parameters"]:
+    s = {k: v for k, v in g.items() if k in ("required", "properties", "dependencies")}
+    if s:
+        jsonschema.validate(values, {**s, "type": "object"})
+```
+
+This catches the failure mode these files actually have: a value that was
+valid when written and has since dropped out of an enum. Both inputs here
+were checked this way — `input.json` was **invalid** until this was run on it
+(`s3_endpoint` still named the pre-rename `artifacts.demo-infra…` host,
+`s3_bucket` was `state`, and the `sthings_collections` release had moved on).
 
 ## Troubleshooting
 

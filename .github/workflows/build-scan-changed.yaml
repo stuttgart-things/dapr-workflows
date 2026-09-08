@@ -197,7 +197,7 @@ jobs:
       # that rather than reconstructing it — the tag ko chose is not
       # something this workflow gets to guess.
       - name: Download image ref
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: image-ref-${{ matrix.dir }}
 

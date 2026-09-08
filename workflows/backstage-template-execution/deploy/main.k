@@ -81,6 +81,21 @@ _secretEnv = [
 ]
 
 # ═══════════════════════════════════════════════════════════════════════
+# 2b. Backstage endpoint — per-lab, therefore cluster-side
+# ═══════════════════════════════════════════════════════════════════════
+# The endpoint belongs to the cluster for the same reason the token beside
+# it does: both are per-lab. Leaving it to the caller's JSON meant every
+# input file had to name a lab, and a LabUL name on a LabDA cluster fails
+# as a DNS timeout inside a workflow run -- invisible from the cluster,
+# green everywhere you would look.
+#
+# The worker falls back to this env var whenever the workflow input omits
+# `backstageURL`, so a lab-agnostic input works unchanged on any cluster.
+_backstageURL: str = option("backstageURL") or "https://backstage.sthings-platform.4sthings.tiab.ssc.sva.de"
+
+_backstageEnv = [{name = "BACKSTAGE_URL", value = _backstageURL}]
+
+# ═══════════════════════════════════════════════════════════════════════
 # 3. Dapr state store (Redis)
 # ═══════════════════════════════════════════════════════════════════════
 stateStore = s.buildRedisStateStore(s.RedisStateStoreSpec {
@@ -121,7 +136,7 @@ deployment = w.buildDaprWorker(w.WorkerSpec {
     appID = _name
     image = _image
     replicas = _replicas
-    env = _secretEnv + _caEnvVars + _insecureEnv
+    env = _secretEnv + _backstageEnv + _caEnvVars + _insecureEnv
     volumes = _caVolumes
     volumeMounts = _caVolumeMounts
 })

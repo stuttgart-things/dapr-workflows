@@ -24,7 +24,10 @@ spec:
       triggerImage: string | default="curlimages/curl:8.11.1" description="Image used by the trigger Job"
 
       # Workflow input — shape is the same as dapr-workflows/backstage-template-execution/input.json
-      backstageURL: string | required=true description="Base URL of the Backstage instance"
+      # Optional on purpose: the endpoint is per-lab and the worker reads it
+      # from BACKSTAGE_URL in its own environment, so a CR that omits it works
+      # unchanged on any cluster. Set it only to override for one run.
+      backstageURL: string | required=false description="Base URL of the Backstage instance. Omit to use the worker's BACKSTAGE_URL (per-lab, set by the cluster)"
       templateRef: string | required=true description="Backstage template entity ref, e.g. template:default/create-terraform-vm"
       dryRun: boolean | default=true description="If true the worker stops before any mutating step"
       values: object | required=true description="Template values — free-form, shape depends on the Backstage template"

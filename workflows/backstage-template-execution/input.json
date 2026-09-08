@@ -1,5 +1,4 @@
 {
-  "backstageURL": "https://backstage.platform.sthings-vsphere.labul.sva.de",
   "templateRef": "template:default/create-terraform-vm",
   "dryRun": false,
   "values": {

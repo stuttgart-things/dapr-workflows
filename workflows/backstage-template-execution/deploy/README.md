@@ -49,6 +49,7 @@ generated Secrets (or patch them at apply time with
 |-----------------------|---------------------------------------------------------|-------|
 | `_name` / `_appID`    | `backstage-template-execution`                          | Deployment name and Dapr `app-id` |
 | `_namespace`          | `backstage-workflows`                                   | |
+| `_backstageURL`       | `https://backstage.sthings-platform.4sthings.tiab.ssc.sva.de` | Rendered as `BACKSTAGE_URL`. Per-lab — injectable: `kcl run main.k -D backstageURL=...`. The worker falls back to it when the workflow input omits `backstageURL` |
 | `_imageRepo`          | `ghcr.io/stuttgart-things/dapr-backstage-template-execution` | Injectable: `kcl run main.k -D imageRepo=...` |
 | `_imageTag`           | 12-char commit SHA                                      | Injectable: `kcl run main.k -D imageTag=...` — set by the release pipeline |
 | `_replicas`           | `1`                                                     | Keep at 1 unless you've validated multi-worker semantics |

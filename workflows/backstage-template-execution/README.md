@@ -58,14 +58,18 @@ Smoke-test the token against the catalog before spinning Dapr up — saves a
 round of debugging if the wrong token type was supplied:
 
 ```bash
+# $BACKSTAGE_URL is what the worker itself uses — run this from inside the
+# cluster (kubectl run --rm ... curlimages/curl) if you want the answer that
+# matters. A name that resolves from your laptop may not resolve from the pod.
 curl -sS -o /dev/null -w '%{http_code}\n' \
   -H "Authorization: Bearer $BACKSTAGE_AUTH_TOKEN" \
-  -k https://backstage.platform.sthings-vsphere.labul.sva.de/api/catalog/entities/by-name/template/default/ansible-provisioning
+  -k "$BACKSTAGE_URL/api/catalog/entities/by-name/template/default/ansible-provisioning"
 ```
 
 - `200` → token valid, template registered, you're good
 - `401` / `403` → wrong token (not a Backstage token, expired, or lacks catalog/scaffolder permission)
 - `404` → token valid but template not registered under `template:default/ansible-provisioning` at that Backstage URL
+- `000` → the name does not resolve or the host is unreachable **from where you ran it**. Seen on a LabDA cluster against a LabUL endpoint: the run dies with a DNS timeout deep inside `CallScaffolder` and nothing on the cluster looks unhealthy
 
 Notes:
 
@@ -212,10 +216,47 @@ a PR description.
 
 | Var | Where | Purpose |
 |---|---|---|
+| `BACKSTAGE_URL` | worker shell | Backstage base URL. Fallback when the workflow input omits `backstageURL` — see [Lab-agnostic inputs](#lab-agnostic-inputs) |
 | `BACKSTAGE_AUTH_TOKEN` | worker shell | Bearer token for Backstage scaffolder API |
 | `GITHUB_TOKEN` | worker shell | Used by `FetchGitHubRun` and `MergePullRequest` activities |
 | `BACKSTAGE_INSECURE_TLS` | worker shell (optional) | `true` to skip TLS verify |
 | `DAPR_HTTP_PORT` | trigger shell | Must match `--dapr-http-port` from shell 1 (default `3500`) |
+
+## Lab-agnostic inputs
+
+The Backstage endpoint is **per-lab and cluster-side**, exactly like the token
+beside it. The worker reads `BACKSTAGE_URL` from its own environment whenever
+the workflow input omits `backstageURL`, so the same input file runs on any
+cluster. In Kubernetes it comes from `deploy/main.k` (`-D backstageURL=...`),
+which flux sets per cluster.
+
+Why it works this way: it used to be required in every input, and every input
+file in this repo named the LabUL endpoint. On a LabDA cluster that name does
+not resolve, and the run dies with
+
+```
+scaffolder call failed: dial tcp: lookup backstage.platform.sthings-vsphere.labul.sva.de
+  on 10.43.0.10:53: i/o timeout
+```
+
+— inside a workflow run, where nothing on the cluster reports a problem. Same
+shape as the CA bundle that was seeded from a shared Vault path.
+
+Pass `backstageURL` in the input only to override a single run.
+
+### What is still lab-specific — and has to be
+
+Only the plumbing is lab-agnostic. Values inside `values` name real
+infrastructure and belong to the caller:
+
+| Example | Lab | Note |
+|---|---|---|
+| `input-ansible-kind.json` | works anywhere the targets exist | `ansible-provisioning` writes config files only |
+| `input.json` / `create-terraform-vm` | **LabUL only** | `pve_api_url` points at `ul-pve01`; there is no LabDA Proxmox host in this fleet — only `ul-pve*` exists. This example cannot be flipped to LabDA without inventing a host |
+
+So a `create-terraform-vm` run needs LabUL up, regardless of which cluster the
+worker runs on. That is a property of Proxmox living in one lab, not of this
+workflow.
 
 ## Troubleshooting
 

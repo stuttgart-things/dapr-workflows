@@ -9,7 +9,6 @@ metadata:
   name: create-vm-dapr-monday-1
   namespace: backstage-workflows
 spec:
-  backstageURL: https://backstage.platform.sthings-vsphere.labul.sva.de
   templateRef: template:default/create-terraform-vm
   dryRun: true
   values:

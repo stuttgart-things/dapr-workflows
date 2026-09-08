@@ -1,0 +1,76 @@
+---
+# LabDA / vSphere counterpart to create-terraform-vm.yaml.
+#
+# Mirrors dapr-workflows/backstage-template-execution/input-vsphere-labda.json.
+# backstageURL is omitted on purpose: the worker uses BACKSTAGE_URL from its
+# own environment, which the cluster sets per lab.
+#
+# dryRun is true here so applying this does not create a VM. Note that the
+# create-terraform-vm template has a `fetch:template ./content` step, which
+# the dry-run endpoint cannot satisfy — it fails with
+#   HTTP 500 ENOENT: ... lstat '/tmp/dry-run-content-.../content'
+# That failure means auth and template registration are fine and nothing else.
+# Flip dryRun to false for a run that actually renders and opens the PR.
+apiVersion: kro.run/v1alpha1
+kind: BackstageTemplateRun
+metadata:
+  name: create-vsphere-vm-dapr-labda-1
+  namespace: backstage-workflows
+spec:
+  templateRef: template:default/create-terraform-vm
+  dryRun: true
+  values:
+    lab: LabDA
+    cloud: vsphere
+    vm_count: "1"
+    vm_name: dapr-labda-1
+    # vSphere placement — these are the values a real LabDA VM uses; see
+    # stuttgart-things/terraform/vsphere/labda/cicd-machinery-test5.
+    vsphere_vm_template: sthings-u26
+    firmware: bios
+    vsphere_vm_folder_path: stuttgart-things/testing
+    datastore: /NetApp-HCI-Datacenter/datastore/DatastoreCluster/NetApp-HCI-Datastore-01
+    resource_pool: Resources
+    network: /NetApp-HCI-Datacenter/network/tiab-prod
+    vm_sizing: small
+    secrets_mode: sops  # pragma: allowlist secret
+    s3_endpoint: https://minio.sthings-platform.4sthings.tiab.ssc.sva.de
+    s3_bucket: vsphere-labda
+    s3_region: main
+    runner: dagger-labda
+    max_retries: "3"
+    retry_delay: "60"
+    provisioning_profile: baseos
+    baseos_manage_filesystem: true
+    baseos_update_packages: true
+    baseos_install_requirements: true
+    baseos_install_motd: true
+    baseos_username: sthings
+    baseos_lvm_home_sizing: "15%"
+    baseos_lvm_root_sizing: "35%"
+    baseos_lvm_var_sizing: "50%"
+    ansible_collections:
+      - community.crypto:3.3.0
+      - community.general:13.3.0
+      - ansible.posix:2.2.2
+      - kubernetes.core:6.5.0
+      - community.docker:5.2.2
+      - community.vmware:6.2.1
+      - awx.awx:24.6.1
+      - community.hashi_vault:7.1.0
+      - ansible.netcommon:8.6.2
+    sthings_collections:
+      - https://github.com/stuttgart-things/ansible/releases/download/sthings-baseos-26.824.1274/sthings-baseos-26.824.1274.tar.gz
+    custom_collections: []
+    export_and_encrypt: false
+  watch:
+    owner: stuttgart-things
+    repo: stuttgart-things
+    # The template derives this: vsphere-vm-<vm_name>-labda for LabDA,
+    # proxmox-vm-<vm_name>-labul for LabUL (template.yaml:1539).
+    workflowFile: pr-vm-deploy.yaml
+    branch: vsphere-vm-dapr-labda-1-labda
+    timeoutMin: 30
+    merge:
+      enabled: true
+      method: squash

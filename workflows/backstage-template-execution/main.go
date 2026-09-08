@@ -210,6 +210,17 @@ func CallScaffolder(ctx workflow.ActivityContext) (any, error) {
 	if in.AuthToken == "" {
 		in.AuthToken = os.Getenv("BACKSTAGE_AUTH_TOKEN")
 	}
+	// The Backstage endpoint is per-lab, exactly like the token next to it,
+	// so it belongs to the cluster and not to the caller's JSON. Without this
+	// fallback every input file has to name a lab, and the ones in this repo
+	// all named LabUL -- which resolves to nothing on a LabDA cluster and
+	// fails as a DNS timeout inside a workflow run, where nobody is looking.
+	if in.BackstageURL == "" {
+		in.BackstageURL = os.Getenv("BACKSTAGE_URL")
+	}
+	if in.BackstageURL == "" {
+		return nil, fmt.Errorf("no Backstage URL: set it in the workflow input or BACKSTAGE_URL in the worker environment")
+	}
 
 	url := in.BackstageURL + "/api/scaffolder/v2/tasks"
 	payload := map[string]interface{}{
@@ -335,6 +346,11 @@ func PollTask(ctx workflow.ActivityContext) (any, error) {
 	}
 	if in.AuthToken == "" {
 		in.AuthToken = os.Getenv("BACKSTAGE_AUTH_TOKEN")
+	}
+	// The workflow forwards the input's BackstageURL, which may now be empty
+	// because CallScaffolder resolved its own copy from the environment.
+	if in.BackstageURL == "" {
+		in.BackstageURL = os.Getenv("BACKSTAGE_URL")
 	}
 
 	req, _ := http.NewRequest(http.MethodGet,

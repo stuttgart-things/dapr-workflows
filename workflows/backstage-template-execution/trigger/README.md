@@ -34,7 +34,9 @@ metadata:
   name: create-vm-demo
   namespace: backstage-workflows
 spec:
-  backstageURL: https://backstage.platform.sthings-vsphere.labul.sva.de
+  # backstageURL omitted on purpose — the worker uses BACKSTAGE_URL from its
+  # own environment, which the cluster sets per lab. Set it here only to
+  # override for a single run.
   templateRef: template:default/create-terraform-vm
   dryRun: true
   values:

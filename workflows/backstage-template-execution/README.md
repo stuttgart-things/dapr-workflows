@@ -58,14 +58,18 @@ Smoke-test the token against the catalog before spinning Dapr up — saves a
 round of debugging if the wrong token type was supplied:
 
 ```bash
+# $BACKSTAGE_URL is what the worker itself uses — run this from inside the
+# cluster (kubectl run --rm ... curlimages/curl) if you want the answer that
+# matters. A name that resolves from your laptop may not resolve from the pod.
 curl -sS -o /dev/null -w '%{http_code}\n' \
   -H "Authorization: Bearer $BACKSTAGE_AUTH_TOKEN" \
-  -k https://backstage.platform.sthings-vsphere.labul.sva.de/api/catalog/entities/by-name/template/default/ansible-provisioning
+  -k "$BACKSTAGE_URL/api/catalog/entities/by-name/template/default/ansible-provisioning"
 ```
 
 - `200` → token valid, template registered, you're good
 - `401` / `403` → wrong token (not a Backstage token, expired, or lacks catalog/scaffolder permission)
 - `404` → token valid but template not registered under `template:default/ansible-provisioning` at that Backstage URL
+- `000` → the name does not resolve or the host is unreachable **from where you ran it**. Seen on a LabDA cluster against a LabUL endpoint: the run dies with a DNS timeout deep inside `CallScaffolder` and nothing on the cluster looks unhealthy
 
 Notes:
 
@@ -212,10 +216,72 @@ a PR description.
 
 | Var | Where | Purpose |
 |---|---|---|
+| `BACKSTAGE_URL` | worker shell | Backstage base URL. Fallback when the workflow input omits `backstageURL` — see [Lab-agnostic inputs](#lab-agnostic-inputs) |
 | `BACKSTAGE_AUTH_TOKEN` | worker shell | Bearer token for Backstage scaffolder API |
 | `GITHUB_TOKEN` | worker shell | Used by `FetchGitHubRun` and `MergePullRequest` activities |
 | `BACKSTAGE_INSECURE_TLS` | worker shell (optional) | `true` to skip TLS verify |
 | `DAPR_HTTP_PORT` | trigger shell | Must match `--dapr-http-port` from shell 1 (default `3500`) |
+
+## Lab-agnostic inputs
+
+The Backstage endpoint is **per-lab and cluster-side**, exactly like the token
+beside it. The worker reads `BACKSTAGE_URL` from its own environment whenever
+the workflow input omits `backstageURL`, so the same input file runs on any
+cluster. In Kubernetes it comes from `deploy/main.k` (`-D backstageURL=...`),
+which flux sets per cluster.
+
+Why it works this way: it used to be required in every input, and every input
+file in this repo named the LabUL endpoint. On a LabDA cluster that name does
+not resolve, and the run dies with
+
+```
+scaffolder call failed: dial tcp: lookup backstage.platform.sthings-vsphere.labul.sva.de
+  on 10.43.0.10:53: i/o timeout
+```
+
+— inside a workflow run, where nothing on the cluster reports a problem. Same
+shape as the CA bundle that was seeded from a shared Vault path.
+
+Pass `backstageURL` in the input only to override a single run.
+
+### What is still lab-specific — and has to be
+
+Only the plumbing is lab-agnostic. Values inside `values` name real
+infrastructure and belong to the caller:
+
+| Example | Lab / cloud | Note |
+|---|---|---|
+| `input-vsphere-labda.json` | **LabDA / vSphere** | Use this while LabUL is down. Values taken from a real deployed VM (`stuttgart-things/terraform/vsphere/labda/cicd-machinery-test5`) |
+| `input.json` | **LabUL / Proxmox** | `pve_api_url` points at `ul-pve01`. There is no LabDA Proxmox host in this fleet — only `ul-pve*` exists — so this one cannot be flipped |
+| `input-ansible-kind.json` | anywhere the targets exist | `ansible-provisioning` writes config files only |
+
+The template itself enforces the split: `LabDA` offers vSphere only, `LabUL`
+offers Proxmox only (`template.yaml`, `dependencies.lab.oneOf`). So the lab
+choice picks the cloud, and the watch branch follows it —
+`vsphere-vm-<name>-labda` vs `proxmox-vm-<name>-labul`.
+
+### Validating an input without building a VM
+
+`create-terraform-vm` has a `fetch:template ./content` step, so a dryRun cannot
+render it (see [dryRun semantics](#dryrun-semantics)) — it confirms auth and
+template registration and nothing about your values. Validate the values
+against the template's own schema instead:
+
+```python
+import yaml, json, jsonschema
+tpl = yaml.safe_load(open("backstage/templates/create-terraform-vm/template.yaml"))
+values = json.load(open("input-vsphere-labda.json"))["values"]
+for g in tpl["spec"]["parameters"]:
+    s = {k: v for k, v in g.items() if k in ("required", "properties", "dependencies")}
+    if s:
+        jsonschema.validate(values, {**s, "type": "object"})
+```
+
+This catches the failure mode these files actually have: a value that was
+valid when written and has since dropped out of an enum. Both inputs here
+were checked this way — `input.json` was **invalid** until this was run on it
+(`s3_endpoint` still named the pre-rename `artifacts.demo-infra…` host,
+`s3_bucket` was `state`, and the `sthings_collections` release had moved on).
 
 ## Troubleshooting
 

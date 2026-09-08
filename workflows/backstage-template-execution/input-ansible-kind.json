@@ -1,11 +1,12 @@
 {
-  "backstageURL": "https://backstage.platform.sthings-vsphere.labul.sva.de",
   "templateRef": "template:default/ansible-provisioning",
   "dryRun": false,
   "values": {
     "provisioning_name": "xplane-function",
     "lab": "labul",
-    "targets": ["cd-mgmt-1.labul.sva.de"],
+    "targets": [
+      "cd-mgmt-1.labul.sva.de"
+    ],
     "provisioning_type": "kind-cluster",
     "ansible_collections": [
       "community.crypto:3.2.0",

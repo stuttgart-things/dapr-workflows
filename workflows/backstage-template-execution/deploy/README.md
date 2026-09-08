@@ -49,7 +49,8 @@ generated Secrets (or patch them at apply time with
 |-----------------------|---------------------------------------------------------|-------|
 | `_name` / `_appID`    | `backstage-template-execution`                          | Deployment name and Dapr `app-id` |
 | `_namespace`          | `backstage-workflows`                                   | |
-| `_image`              | `ttl.sh/stuttgart-things/backstage-template-execution:1h` | Placeholder — replace with the image built by `Taskfile.yaml` |
+| `_imageRepo`          | `ghcr.io/stuttgart-things/dapr-backstage-template-execution` | Injectable: `kcl run main.k -D imageRepo=...` |
+| `_imageTag`           | 12-char commit SHA                                      | Injectable: `kcl run main.k -D imageTag=...` — set by the release pipeline |
 | `_replicas`           | `1`                                                     | Keep at 1 unless you've validated multi-worker semantics |
 | `_redisHost`          | `redis-stack.homerun2-flux.svc.cluster.local:6379`      | Dapr statestore backend |
 | `_enableCA`           | `True`                                                  | Mount a trusted CA bundle (see below) |
@@ -110,5 +111,28 @@ cd ..    # back to backstage-template-execution/
 
 - Dapr control plane installed in the target cluster (`dapr-system` namespace)
 - Redis reachable at `_redisHost` (adjust if you're not on the homerun2 cluster)
-- Image built and pushed by `Taskfile.yaml`; update `_image` to match the
-  actual tag before applying
+- An image on `ghcr.io/stuttgart-things/dapr-backstage-template-execution`.
+  Pushes to `main` publish one automatically (see
+  [Release](../../../README.md#release)); `Taskfile.yaml` only pushes to
+  `ttl.sh`, which expires and is not reachable from a cluster.
+
+## Rendering for a release
+
+The release job in `.github/workflows/build-scan-changed.yaml` renders this
+base from the **repo root**, not from this directory:
+
+```bash
+dagger call -m github.com/stuttgart-things/dagger/kcl@v0.129.4 \
+  push-kustomize-base \
+  --source . \
+  --subpath workflows/backstage-template-execution/deploy \
+  --parameters "imageTag=<12-char-sha>" \
+  --address ghcr.io/stuttgart-things/dapr-backstage-template-execution-kustomize \
+  --tag <12-char-sha>
+```
+
+`--subpath` is what makes the `deploy_base = { path = "../../../deploy-base" }`
+dependency resolve: the whole repo is mounted and `kcl` cds into the sub-package,
+so the parent directory is present. Rendering with `--source ./deploy` alone
+fails — that was the open question in the [deploy-base
+README](../../../deploy-base/README.md), and `--subpath` is the answer to it.

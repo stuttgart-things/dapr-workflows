@@ -23,7 +23,14 @@ import manifests
 # ═══════════════════════════════════════════════════════════════════════
 _name = "backstage-template-execution"
 _namespace = "backstage-workflows"
-_image = "ghcr.io/stuttgart-things/dapr-backstage-template-execution:49b147e70413"
+
+# Repo and tag are injectable so the release pipeline can render this base
+# for the exact commit it just built:
+#   kcl run main.k -D imageTag=<short-sha>
+# The defaults keep a plain `kcl run main.k` working for local dev.
+_imageRepo: str = option("imageRepo") or "ghcr.io/stuttgart-things/dapr-backstage-template-execution"
+_imageTag: str = option("imageTag") or "49b147e70413"
+_image = "${_imageRepo}:${_imageTag}"
 _replicas = 1
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -65,7 +72,7 @@ backstageSecret = sec.buildOpaqueSecret("backstage-auth-token", _namespace, {
     token = "REPLACE_WITH_BACKSTAGE_AUTH_TOKEN"
 })
 redisSecret = sec.buildOpaqueSecret("redis-password", _namespace, {
-    password = "REPLACE_WITH_REDIS_PASSWORD"
+    password = "REPLACE_WITH_REDIS_PASSWORD"  # pragma: allowlist secret
 })
 
 _secretEnv = [
@@ -79,7 +86,7 @@ _secretEnv = [
 stateStore = s.buildRedisStateStore(s.RedisStateStoreSpec {
     namespace = _namespace
     redisHost = _redisHost
-    passwordSecret = "redis-password"
+    passwordSecret = "redis-password"  # pragma: allowlist secret
 })
 
 # ═══════════════════════════════════════════════════════════════════════

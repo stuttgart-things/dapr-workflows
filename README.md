@@ -36,6 +36,33 @@ dapr run --app-id backstage-tpl --dapr-http-port 3500 -- go run .
 ./run.sh status <id>
 ```
 
+## Release
+
+Every push to `main` that touches `workflows/**` runs
+`.github/workflows/build-scan-changed.yaml`: gosec → ko-build → trivy against
+`ttl.sh`, then a `release` job that publishes to ghcr.
+
+| Artifact | Repo | Tag |
+|----------|------|-----|
+| Container image | `ghcr.io/stuttgart-things/dapr-<workflow-dir>` | 12-char commit SHA |
+| Kustomize base (KCL deploy dirs only) | `ghcr.io/stuttgart-things/dapr-<workflow-dir>-kustomize` | the **same** 12-char SHA |
+
+Two things are deliberate:
+
+- The released image is the one Trivy scanned — the release job copies the
+  already-built `ttl.sh` image with crane instead of rebuilding it.
+- Both artifacts carry the same tag, and the kustomize base is rendered with
+  that tag injected into the Deployment. Pulling artifact `<sha>` therefore
+  cannot hand you manifests pointing at a different image. The flux bundle
+  under `apps/dapr/components/template-execution` pins both
+  (`DAPR_BACKSTAGE_TPL_IMAGE_TAG`, `DAPR_BACKSTAGE_TPL_VERSION`).
+
+There is no moving `latest` tag. Pin the SHA in flux, reconcile, and check the
+running pod's image.
+
+`Taskfile.yaml` remains local-only: it pushes to `ttl.sh`, which expires and is
+not reachable from a cluster.
+
 ## Getting Started
 
 ### Install Dapr CLI

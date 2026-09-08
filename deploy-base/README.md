@@ -66,7 +66,7 @@ tokenSecret = sec.buildOpaqueSecret("api-token", _namespace, {token = "REPLACE_M
 stateStore = s.buildRedisStateStore(s.RedisStateStoreSpec {
     namespace = _namespace
     redisHost = "redis.default.svc.cluster.local:6379"
-    passwordSecret = "redis-password"
+    passwordSecret = "redis-password"  # pragma: allowlist secret
 })
 
 deployment = w.buildDaprWorker(w.WorkerSpec {
@@ -80,17 +80,28 @@ deployment = w.buildDaprWorker(w.WorkerSpec {
 manifests.yaml_stream([namespace, tokenSecret, stateStore, deployment])
 ```
 
-## Local path dep vs OCI push
+## Local path dep and the dagger render
 
-The current Taskfile `build-scan-image-ko` uses Dagger's
-`push-kustomize-base` against `$DEPLOY_DIR`, which mounts only the workflow's
-`deploy/` directory. A `{ path = "../../deploy-base" }` dep resolves fine
-for local `kcl run`, but breaks inside the dagger container because the
-parent folder isn't mounted.
+`workflows/*/deploy/kcl.mod` depends on this module by relative path
+(`{ path = "../../../deploy-base" }`), which points outside the workflow's own
+`deploy/` directory. Rendering with `--source ./deploy` fails in the dagger
+container because the parent folders are not mounted.
 
-When you're ready to publish kustomize bases via that task, either:
-- publish `deploy_base` as an OCI KCL package (`kcl mod push oci://ghcr.io/stuttgart-things/deploy_base`) and switch the dep to `{ oci = "...", tag = "..." }`, or
-- update the dagger call to mount the repo root and pass a sub-path to `kcl run`.
+The fix is `--subpath`: mount the repo root and let `kcl` cd into the
+sub-package, so the relative dep resolves.
 
-Until then, local `kcl run main.k` in a workflow's `deploy/` folder works
-and is enough for applying manifests directly to a dev cluster.
+```bash
+dagger call -m github.com/stuttgart-things/dagger/kcl@v0.129.4 \
+  render-kustomize-base \
+  --source . \
+  --subpath workflows/backstage-template-execution/deploy \
+  export --path=/tmp/kustomize-base
+```
+
+That is what the release job in `.github/workflows/build-scan-changed.yaml`
+does. Publishing `deploy_base` as its own OCI KCL package is therefore not
+required — the path dep stays, and the module has no release cycle of its own
+to keep in sync.
+
+Local `kcl run main.k` inside a workflow's `deploy/` folder is unaffected and
+still works.

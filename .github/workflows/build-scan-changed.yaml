@@ -18,7 +18,10 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  # PR runs are throwaway and safe to cancel. A main run is not: cancelling it
+  # between the image copy and the kustomize push leaves a tag that resolves to
+  # an image but has no manifests, and flux pins both under that one tag.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -83,24 +86,39 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.build.outputs.matrix }}
+      release_tag: ${{ steps.build.outputs.release_tag }}
     steps:
       - id: build
         env:
           DIRS: ${{ needs.detect.outputs.dirs }}
           REPO_NAME: ${{ github.event.repository.name }}
+          OWNER: ${{ github.repository_owner }}
           SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           SHORT_SHA=${SHA:0:7}
-          matrix=$(jq -cn --argjson dirs "$DIRS" --arg repo "$REPO_NAME" --arg sha "$SHORT_SHA" '
+
+          # The release tag is the 12-char short SHA, because that is what the
+          # flux bundle pins (DAPR_BACKSTAGE_TPL_IMAGE_TAG / _VERSION) and both
+          # the image and its kustomize artifact have to carry the same one.
+          RELEASE_TAG=${SHA:0:12}
+
+          matrix=$(jq -cn \
+            --argjson dirs "$DIRS" \
+            --arg repo "$REPO_NAME" \
+            --arg owner "$OWNER" \
+            --arg sha "$SHORT_SHA" '
             {include: [
               $dirs[] | {
                 dir: .,
-                image_repo: ("ttl.sh/" + $repo + "-" + . + "-" + $sha)
+                image_repo: ("ttl.sh/" + $repo + "-" + . + "-" + $sha),
+                ghcr_repo: ("ghcr.io/" + $owner + "/dapr-" + .),
+                kustomize_repo: ("ghcr.io/" + $owner + "/dapr-" + . + "-kustomize")
               }
             ]}
           ')
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
           echo "$matrix" | jq .
 
   security-scan:
@@ -137,3 +155,133 @@ jobs:
     with:
       image-ref-artifact: image-ref-${{ matrix.dir }}
       artifact-name: trivy-report-${{ matrix.dir }}
+
+  # ─────────────────────────────────────────────────────────────────────
+  # Release — main only.
+  #
+  # Everything above targets ttl.sh, which expires. Nothing there is
+  # reachable from a cluster, which is why the ghcr packages sat at an
+  # April image while main moved on. This stage promotes the exact bits
+  # that were just scanned to ghcr and publishes the matching kustomize
+  # base under the *same* tag, because the flux bundle pins both.
+  # ─────────────────────────────────────────────────────────────────────
+  release:
+    name: Release ${{ matrix.dir }}
+    needs: [detect, plan, build, trivy-scan]
+    if: >-
+      needs.detect.outputs.any == 'true'
+      && github.event_name == 'push'
+      && github.ref == 'refs/heads/main'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      DAGGER_VERSION: "0.21.9"
+      DAGGER_CRANE_MODULE: github.com/stuttgart-things/dagger/crane@v0.129.4
+      DAGGER_KCL_MODULE: github.com/stuttgart-things/dagger/kcl@v0.129.4
+      RELEASE_TAG: ${{ needs.plan.outputs.release_tag }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Dagger CLI
+        run: |
+          curl -fsSL https://dl.dagger.io/dagger/install.sh \
+            | BIN_DIR=$HOME/.local/bin DAGGER_VERSION="$DAGGER_VERSION" sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      # The build job wrote the fully-qualified ttl.sh ref it pushed. Use
+      # that rather than reconstructing it — the tag ko chose is not
+      # something this workflow gets to guess.
+      - name: Download image ref
+        uses: actions/download-artifact@v7
+        with:
+          name: image-ref-${{ matrix.dir }}
+
+      - name: Read image ref
+        id: src
+        run: |
+          set -euo pipefail
+          SRC=$(cat image-ref.txt)
+          [ -n "$SRC" ] || { echo "empty image ref artifact"; exit 1; }
+          echo "image-ref=$SRC" >> "$GITHUB_OUTPUT"
+          echo "Staging from: $SRC"
+
+      - name: Copy image to ghcr
+        env:
+          REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          dagger call -m "$DAGGER_CRANE_MODULE" copy \
+            --source "${{ steps.src.outputs.image-ref }}" \
+            --target "${{ matrix.ghcr_repo }}:${RELEASE_TAG}" \
+            --target-registry ghcr.io \
+            --target-username "${{ github.actor }}" \
+            --target-password env:REGISTRY_PASSWORD \
+            --platform linux/amd64 \
+            --progress plain
+
+      # Only KCL-based deploy dirs produce a kustomize artifact. A workflow
+      # with plain YAML under deploy/ (or none at all) is skipped rather
+      # than failing the release of its image.
+      - name: Detect KCL deploy dir
+        id: deploy
+        run: |
+          set -euo pipefail
+          if [ -f "workflows/${{ matrix.dir }}/deploy/main.k" ]; then
+            echo "kcl=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "kcl=false" >> "$GITHUB_OUTPUT"
+            echo "No workflows/${{ matrix.dir }}/deploy/main.k — skipping kustomize push."
+          fi
+
+      # --source is the repo root, not the deploy dir: deploy/kcl.mod has a
+      # relative path dep on ../../../deploy-base, which only resolves when
+      # the whole repo is mounted and kcl cds in via --subpath.
+      #
+      # --parameters pins the image the base points at to the one staged
+      # above, so pulling artifact <tag> can never hand you a Deployment
+      # referencing some other build.
+      - name: Push kustomize base
+        if: steps.deploy.outputs.kcl == 'true'
+        env:
+          GITHUB_USER: ${{ github.actor }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          dagger call -m "$DAGGER_KCL_MODULE" push-kustomize-base \
+            --source . \
+            --subpath "workflows/${{ matrix.dir }}/deploy" \
+            --parameters "imageRepo=${{ matrix.ghcr_repo }},imageTag=${RELEASE_TAG}" \
+            --address "${{ matrix.kustomize_repo }}" \
+            --tag "${RELEASE_TAG}" \
+            --user env:GITHUB_USER \
+            --password env:GITHUB_TOKEN \
+            --progress plain
+
+      # A push proves the bytes arrived, not that they are usable. Pull the
+      # artifact back and parse it.
+      - name: Verify the pushed base
+        if: steps.deploy.outputs.kcl == 'true'
+        uses: stuttgart-things/github-workflow-templates/actions/verify-kustomize-base@main
+        with:
+          artifact-ref: ${{ matrix.kustomize_repo }}:${{ needs.plan.outputs.release_tag }}
+          registry-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Summary
+        run: |
+          {
+            echo "## Release — ${{ matrix.dir }}"
+            echo ""
+            echo "**Image:** \`${{ matrix.ghcr_repo }}:${RELEASE_TAG}\`"
+            if [ "${{ steps.deploy.outputs.kcl }}" = "true" ]; then
+              echo "**Kustomize:** \`${{ matrix.kustomize_repo }}:${RELEASE_TAG}\`"
+            else
+              echo "**Kustomize:** _skipped — no KCL deploy dir_"
+            fi
+            echo ""
+            echo "Pin both in flux with tag \`${RELEASE_TAG}\`."
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -24,14 +24,25 @@ spec:
       triggerImage: string | default="curlimages/curl:8.11.1" description="Image used by the trigger Job"
 
       # Workflow input — shape is the same as dapr-workflows/backstage-template-execution/input.json
-      # Optional on purpose: the endpoint is per-lab and the worker reads it
-      # from BACKSTAGE_URL in its own environment, so a CR that omits it works
-      # unchanged on any cluster. Set it only to override for one run.
-      backstageURL: string | required=false description="Base URL of the Backstage instance. Omit to use the worker's BACKSTAGE_URL (per-lab, set by the cluster)"
+      # default="" rather than required=false. The endpoint is per-lab and the
+      # worker reads it from BACKSTAGE_URL in its own environment, so a CR that
+      # omits it must work -- but a merely OPTIONAL field is not enough: the
+      # marshal below dereferences it, and kro fails an unset key outright:
+      #   failed to evaluate expression: ... no such key: backstageURL
+      # The instance then hangs in IN_PROGRESS with no ConfigMap and no Job.
+      # A default makes the key always present; "" is what the worker treats
+      # as "not given", so the env fallback applies. Verified on a live cluster.
+      backstageURL: string | default="" description="Base URL of the Backstage instance. Leave unset to use the worker's BACKSTAGE_URL (per-lab, set by the cluster)"
       templateRef: string | required=true description="Backstage template entity ref, e.g. template:default/create-terraform-vm"
       dryRun: boolean | default=true description="If true the worker stops before any mutating step"
       values: object | required=true description="Template values — free-form, shape depends on the Backstage template"
-      watch: object | required=true description="GitHub Actions watch config (owner/repo/workflowFile/branch/timeoutMin/merge)"
+      # Optional, because the Go type is: `Watch *GitHubWatch json:"watch,omitempty"`
+      # and the workflow returns right after the scaffolder when it is nil
+      # (main.go). Requiring it here contradicted the code and made the
+      # cheapest useful CR -- a dryRun smoke test, which never reaches the
+      # watch -- fail schema validation, so the only way to try the trigger
+      # path was to invent a watch block that nothing reads.
+      watch: object | required=false description="GitHub Actions watch config (owner/repo/workflowFile/branch/timeoutMin/merge). Omit to stop after the scaffolder task completes."
 
     status:
       jobName: ${trigger.metadata.name}
@@ -50,7 +61,7 @@ spec:
           name: ${schema.metadata.name}-input
         data:
           input.json: |
-            ${json.marshal({"backstageURL": schema.spec.backstageURL, "templateRef": schema.spec.templateRef, "dryRun": schema.spec.dryRun, "values": schema.spec.values, "watch": schema.spec.watch})}
+            ${json.marshal(has(schema.spec.watch) ? {"backstageURL": schema.spec.backstageURL, "templateRef": schema.spec.templateRef, "dryRun": schema.spec.dryRun, "values": schema.spec.values, "watch": schema.spec.watch} : {"backstageURL": schema.spec.backstageURL, "templateRef": schema.spec.templateRef, "dryRun": schema.spec.dryRun, "values": schema.spec.values})}
 
     # Trigger Job — mounts the ConfigMap and POSTs it to the dapr sidecar.
     # TTL auto-cleans the Job 5 min after completion; delete the

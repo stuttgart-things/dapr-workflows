@@ -167,6 +167,59 @@ scaffolderDone:
 	return &result, fmt.Errorf("timed out waiting for gh workflow %s on branch %s", in.Watch.WorkflowFile, in.Watch.Branch)
 }
 
+// GateAndMergeWorkflow judges an EXISTING pull request and merges it, without
+// scaffolding anything or waiting for a build.
+//
+// BackstageTemplateWorkflow already does this, but only as the tail of one long
+// instance: scaffold, wait for the GitHub run, gate, merge. When the wait runs
+// out the instance FAILS and the gate never runs -- even though the PR is fine
+// and the build finished a minute later. The build is unaffected (the workflow
+// watches, it does not drive), so what is lost is only the judgement, and there
+// is no way to ask for just that part again.
+//
+// Witnessed on labda-dev-a: timeoutMin 45 is calibrated for a plain VM, and a
+// provisioning_profile=kubernetes build adds base-os, RKE2 and a flux
+// bootstrap. The PR was healthy and had to be merged by hand.
+//
+// This is the same MergePullRequest activity, reachable on its own.
+//
+// NOT reachable from a BackstageTemplateRun yet, despite the CR carrying a
+// `workflowName` field: the RGD hardcodes the payload as
+// {backstageURL, templateRef, dryRun, values, watch}, which is the shape
+// BackstageTemplateWorkflow reads and nothing like MergeInput. Pointing
+// workflowName here today sends that payload, every MergeInput field lands
+// empty, and the guard below refuses it. A second RGD -- or a payload the
+// existing one can shape per workflow -- is the follow-up.
+//
+// Until then this is started by POSTing MergeInput to the sidecar directly,
+// which is what the recovery case actually needs: a PR is already open and
+// somebody wants it judged.
+func GateAndMergeWorkflow(ctx *workflow.WorkflowContext) (any, error) {
+	var in MergeInput
+	if err := ctx.GetInput(&in); err != nil {
+		return nil, err
+	}
+	if in.Owner == "" || in.Repo == "" || in.Branch == "" {
+		return nil, fmt.Errorf("owner, repo and branch are required")
+	}
+	if in.Method == "" {
+		in.Method = "squash"
+	}
+
+	ctx.SetCustomStatus(fmt.Sprintf("gating %s/%s on branch %s", in.Owner, in.Repo, in.Branch))
+
+	// The activity finds the open PR for the branch, refuses on any check that
+	// is not green, and merges otherwise. A refusal comes back as an error,
+	// which is the intended outcome rather than a fault: this workflow says
+	// whether the PR was merged, and if not, which checks stopped it.
+	var merged MergeResult
+	if err := ctx.CallActivity(MergePullRequest, workflow.WithActivityInput(in)).Await(&merged); err != nil {
+		return nil, fmt.Errorf("gate and merge: %w", err)
+	}
+	ctx.SetCustomStatus(fmt.Sprintf("merged PR #%d (%s)", merged.PRNumber, merged.SHA))
+	return &merged, nil
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // ACTIVITIES
 // ─────────────────────────────────────────────────────────────────────────────
@@ -720,6 +773,9 @@ func main() {
 	})))
 
 	r := workflow.NewRegistry()
+	if err := r.AddWorkflowN("GateAndMergeWorkflow", GateAndMergeWorkflow); err != nil {
+		log.Fatalf("register GateAndMergeWorkflow: %v", err)
+	}
 	if err := r.AddWorkflowN("BackstageTemplateWorkflow", BackstageTemplateWorkflow); err != nil {
 		log.Fatalf("register workflow: %v", err)
 	}

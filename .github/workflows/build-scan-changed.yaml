@@ -132,8 +132,39 @@ jobs:
       working-directory: workflows/${{ matrix.dir }}
       artifact-name: security-report-${{ matrix.dir }}
 
+  unit-test:
+    name: Unit test ${{ matrix.dir }}
+    needs: [detect, plan]
+    if: needs.detect.outputs.any == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: workflows/${{ matrix.dir }}/go.mod
+          cache-dependency-path: workflows/${{ matrix.dir }}/go.sum
+
+      # Not every workflow dir is a Go module, and one without tests must not
+      # fail the build -- `go test` on a module with no _test.go files is a
+      # pass, so only a MISSING module is skipped here.
+      - name: go test
+        working-directory: workflows/${{ matrix.dir }}
+        run: |
+          set -euo pipefail
+          if [[ ! -f go.mod ]]; then
+            echo "no go.mod in workflows/${{ matrix.dir }} -- nothing to test"
+            exit 0
+          fi
+          go test -race ./...
+
   build:
-    needs: [detect, plan, security-scan]
+    # unit-test gates the image: a merge gate that judges a partial check list
+    # must not reach a cluster, and that is exactly what the tests cover.
+    needs: [detect, plan, security-scan, unit-test]
     if: needs.detect.outputs.any == 'true'
     strategy:
       fail-fast: false

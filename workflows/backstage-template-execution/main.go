@@ -222,22 +222,30 @@ func CallScaffolder(ctx workflow.ActivityContext) (any, error) {
 		return nil, fmt.Errorf("no Backstage URL: set it in the workflow input or BACKSTAGE_URL in the worker environment")
 	}
 
+	// The entity is fetched on BOTH paths now. dry-run needs it inline anyway;
+	// the real path needs it for the schema defaults, which the scaffolder API
+	// does not apply and the browser form does. Without this, every field the
+	// caller did not name arrives empty -- see applySchemaDefaults.
+	tmpl, err := fetchTemplateEntity(in.BackstageURL, in.TemplateRef, in.AuthToken)
+	if err != nil {
+		return nil, fmt.Errorf("fetch template: %w", err)
+	}
+	values := applySchemaDefaults(tmpl, in.Values)
+	if added := len(values) - len(in.Values); added > 0 {
+		slog.Info("filled schema defaults the caller did not supply",
+			"templateRef", in.TemplateRef, "count", added)
+	}
+
 	url := in.BackstageURL + "/api/scaffolder/v2/tasks"
 	payload := map[string]interface{}{
 		"templateRef": in.TemplateRef,
-		"values":      in.Values,
+		"values":      values,
 	}
 	if in.DryRun {
-		// Backstage's /dry-run endpoint requires the full template entity inline.
-		// Fetch it from the catalog first.
-		tmpl, err := fetchTemplateEntity(in.BackstageURL, in.TemplateRef, in.AuthToken)
-		if err != nil {
-			return nil, fmt.Errorf("fetch template: %w", err)
-		}
 		url = in.BackstageURL + "/api/scaffolder/v2/dry-run"
 		payload = map[string]interface{}{
 			"template":          tmpl,
-			"values":            in.Values,
+			"values":            values,
 			"secrets":           map[string]string{},
 			"directoryContents": []interface{}{},
 		}
@@ -757,4 +765,134 @@ func main() {
 	defer stop()
 	<-sigCtx.Done()
 	slog.Info("shutting down")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SCHEMA DEFAULTS
+// ─────────────────────────────────────────────────────────────────────────────
+
+// applySchemaDefaults fills in `default:` values the caller did not supply.
+//
+// JSON-Schema `default` is a UI hint: a validator does not apply it, and neither
+// does Backstage's scaffolder API. The form fills those fields in the browser,
+// so a template driven through the UI gets them and the same template driven
+// through this worker does NOT -- every unset field arrives as an empty string.
+//
+// That is not a cosmetic difference. On create-terraform-vm it rendered
+//
+//	s3     = ""                       (backend.tf, terraform init fails)
+//	vsphere_vm_template    = ""
+//	vsphere_datastore      = ""
+//	vsphere_network        = ""
+//
+// while bucket and region came out right, because THAT template happens to
+// carry its own `| default(...)` on those two lines and on nothing else. 57 of
+// its values have a schema default and no such fallback. Adding 57 fallbacks
+// would duplicate every default in two places that then drift silently; filling
+// them from the schema, which is where they are already written down, does not.
+//
+// Values the caller set are never overwritten -- an explicit empty string stays
+// empty, because "I mean blank" and "I said nothing" are different and only the
+// second one is being repaired here.
+func applySchemaDefaults(entity map[string]interface{}, values map[string]interface{}) map[string]interface{} {
+	out := map[string]interface{}{}
+	for k, v := range values {
+		out[k] = v
+	}
+
+	spec, _ := entity["spec"].(map[string]interface{})
+	pages, _ := spec["parameters"].([]interface{})
+
+	for _, p := range pages {
+		page, ok := p.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		applyProps(page["properties"], out)
+
+		// Conditional branches. rjsf picks the branch whose discriminator enum
+		// contains the current value -- `lab: LabDA` selects the vSphere block
+		// and its datastore/network/template defaults. Without this only the
+		// unconditional fields would be filled, which is most of the shape but
+		// none of the ones that name a machine.
+		deps, _ := page["dependencies"].(map[string]interface{})
+		for depKey, depVal := range deps {
+			applyDependency(depKey, depVal, out)
+		}
+	}
+	return out
+}
+
+// applyProps fills defaults from one `properties` object.
+func applyProps(props interface{}, out map[string]interface{}) {
+	m, ok := props.(map[string]interface{})
+	if !ok {
+		return
+	}
+	for name, raw := range m {
+		prop, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		def, hasDef := prop["default"]
+		if !hasDef {
+			continue
+		}
+		if _, set := out[name]; !set {
+			out[name] = def
+		}
+	}
+}
+
+// applyDependency walks one `dependencies.<key>` entry, taking the oneOf branch
+// whose own constraint on <key> matches the value already chosen.
+func applyDependency(key string, dep interface{}, out map[string]interface{}) {
+	d, ok := dep.(map[string]interface{})
+	if !ok {
+		return
+	}
+	// A dependency can be a bare properties block rather than a oneOf.
+	applyProps(d["properties"], out)
+
+	branches, _ := d["oneOf"].([]interface{})
+	for _, b := range branches {
+		branch, ok := b.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		props, _ := branch["properties"].(map[string]interface{})
+		if !branchMatches(props, key, out) {
+			continue
+		}
+		applyProps(props, out)
+		// Branches nest: the LabUL arm carries its own `dependencies.cloud`.
+		if nested, ok := branch["dependencies"].(map[string]interface{}); ok {
+			for k, v := range nested {
+				applyDependency(k, v, out)
+			}
+		}
+	}
+}
+
+// branchMatches reports whether a oneOf arm applies, by testing the caller's
+// value for the discriminator against the arm's enum for that same key.
+func branchMatches(props map[string]interface{}, key string, out map[string]interface{}) bool {
+	disc, ok := props[key].(map[string]interface{})
+	if !ok {
+		return false
+	}
+	allowed, ok := disc["enum"].([]interface{})
+	if !ok {
+		return false
+	}
+	have, set := out[key]
+	if !set {
+		return false
+	}
+	for _, a := range allowed {
+		if fmt.Sprintf("%v", a) == fmt.Sprintf("%v", have) {
+			return true
+		}
+	}
+	return false
 }

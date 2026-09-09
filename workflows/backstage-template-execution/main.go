@@ -483,38 +483,82 @@ func FetchGitHubRun(ctx workflow.ActivityContext) (any, error) {
 // `neutral` and `skipped` are green on purpose. A skipped job is the normal
 // state of a conditional workflow -- pr-vm-deploy.yaml alone contributes
 // several -- and treating them as failures would block every merge.
+// githubAPI is a var, not a const, so the merge gate can be tested against an
+// httptest server. It is the one call site where that matters: unfinishedChecks
+// decides whether a PR merges, and its pagination cannot be proven against the
+// real API without a commit carrying 100+ check runs.
+var githubAPI = "https://api.github.com"
+
 func unfinishedChecks(owner, repo, sha, token string) ([]string, error) {
-	url := fmt.Sprintf(
-		"https://api.github.com/repos/%s/%s/commits/%s/check-runs?per_page=100",
-		owner, repo, sha,
-	)
-	req, _ := http.NewRequest(http.MethodGet, url, nil)
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	raw, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, raw)
-	}
-
 	type checkRun struct {
 		Name       string `json:"name"`
 		Status     string `json:"status"`
 		Conclusion string `json:"conclusion"`
 		StartedAt  string `json:"started_at"`
 	}
-	var parsed struct {
-		TotalCount int        `json:"total_count"`
-		CheckRuns  []checkRun `json:"check_runs"`
+
+	// PAGINATE, AND REFUSE RATHER THAN GUESS.
+	//
+	// The endpoint caps per_page at 100. Reading one page and merging on it is
+	// fail-OPEN: a red check on page 2 is invisible, and the merge happens
+	// anyway. That is the one direction this gate must never fail in.
+	//
+	// 100 is not far off. Measured on stuttgart-things@83d6ea08f: 46 check
+	// runs from two pushes. Superseded entries count, and every re-run adds a
+	// whole suite -- so the number grows with exactly the activity that makes
+	// a careful gate matter most.
+	const maxPages = 20 // 2000 check runs: a bound, not an expectation
+	var all []checkRun
+	total := -1
+	for page := 1; ; page++ {
+		if page > maxPages {
+			return nil, fmt.Errorf("check runs for %s: exceeded %d pages (%d of %d collected)",
+				sha, maxPages, len(all), total)
+		}
+		url := fmt.Sprintf(
+			githubAPI+"/repos/%s/%s/commits/%s/check-runs?per_page=100&page=%d",
+			owner, repo, sha, page,
+		)
+		req, _ := http.NewRequest(http.MethodGet, url, nil)
+		req.Header.Set("Accept", "application/vnd.github+json")
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		raw, _ := io.ReadAll(resp.Body)
+		resp.Body.Close() // in a loop: close per iteration, not via defer
+		if resp.StatusCode != 200 {
+			return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, raw)
+		}
+
+		var parsed struct {
+			TotalCount int        `json:"total_count"`
+			CheckRuns  []checkRun `json:"check_runs"`
+		}
+		if err := json.Unmarshal(raw, &parsed); err != nil {
+			return nil, err
+		}
+		all = append(all, parsed.CheckRuns...)
+		total = parsed.TotalCount
+
+		// A short page is the last one. Do NOT loop on len(all) < total: a
+		// check created while we page raises total_count and would spin us to
+		// maxPages against an endpoint whose last page is already empty.
+		if len(parsed.CheckRuns) < 100 {
+			break
+		}
 	}
-	if err := json.Unmarshal(raw, &parsed); err != nil {
-		return nil, err
+
+	// Backstop for the case the loop cannot explain: fewer runs collected than
+	// the API says exist. Refusing is right on both readings -- either the
+	// list is genuinely partial, or a check appeared mid-pagination, and a
+	// brand-new check is queued, hence not green, hence a refusal anyway.
+	if len(all) < total {
+		return nil, fmt.Errorf("check runs for %s: collected %d of %d -- refusing to judge a partial list",
+			sha, len(all), total)
 	}
 
 	// KEEP ONLY THE NEWEST RUN PER NAME.
@@ -534,7 +578,7 @@ func unfinishedChecks(owner, repo, sha, token string) ([]string, error) {
 	// jobs called `Config` in that measurement -- harmless there (all
 	// skipped/success), worth knowing before naming a job something generic.
 	newest := map[string]checkRun{}
-	for _, c := range parsed.CheckRuns {
+	for _, c := range all {
 		if prev, ok := newest[c.Name]; !ok || c.StartedAt > prev.StartedAt {
 			newest[c.Name] = c
 		}
@@ -554,7 +598,7 @@ func unfinishedChecks(owner, repo, sha, token string) ([]string, error) {
 	}
 	sort.Strings(bad) // map order is random; a stable message is greppable
 	slog.Info("pr head checks",
-		"sha", sha, "total", parsed.TotalCount, "distinct", len(newest), "notGreen", len(bad))
+		"sha", sha, "total", total, "distinct", len(newest), "notGreen", len(bad))
 	return bad, nil
 }
 

@@ -50,6 +50,23 @@ const entityJSON = `{
         }
       },
       {
+        "title": "Export",
+        "properties": {
+          "export_and_encrypt": {"type": "boolean", "default": false}
+        },
+        "dependencies": {
+          "export_and_encrypt": {
+            "oneOf": [
+              {"properties": {"export_and_encrypt": {"const": false}}},
+              {"properties": {
+                 "export_and_encrypt": {"const": true},
+                 "export_paths":       {"type": "string", "default": "/tmp/kubeconfig"}
+              }}
+            ]
+          }
+        }
+      },
+      {
         "title": "Terraform Backend (S3)",
         "properties": {
           "s3_endpoint": {"type": "string", "default": "https://minio.example.com"},
@@ -142,5 +159,23 @@ func TestNoBranchWithoutDiscriminator(t *testing.T) {
 	}
 	if got["lab"] != "LabUL" {
 		t.Fatalf("top-level default still applies: %#v", got["lab"])
+	}
+}
+
+// Boolean discriminators are written `const: true` / `const: false`, not as an
+// enum. Reading only `enum` skips every boolean-gated block -- which on
+// create-terraform-vm is most of the optional ones, including the export that
+// produces the kubeconfig the Vault step later demands.
+func TestMatchesConstDiscriminator(t *testing.T) {
+	got := applySchemaDefaults(entity(t), map[string]interface{}{"export_and_encrypt": true})
+	if got["export_paths"] != "/tmp/kubeconfig" {
+		t.Fatalf("const-gated default not filled: %#v", got["export_paths"])
+	}
+}
+
+func TestConstDiscriminatorFalseArmContributesNothing(t *testing.T) {
+	got := applySchemaDefaults(entity(t), map[string]interface{}{"export_and_encrypt": false})
+	if _, present := got["export_paths"]; present {
+		t.Fatalf("false arm leaked export_paths: %#v", got["export_paths"])
 	}
 }

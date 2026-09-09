@@ -881,12 +881,20 @@ func branchMatches(props map[string]interface{}, key string, out map[string]inte
 	if !ok {
 		return false
 	}
-	allowed, ok := disc["enum"].([]interface{})
-	if !ok {
-		return false
-	}
 	have, set := out[key]
 	if !set {
+		return false
+	}
+	// Two spellings, both in use in the same template. `enum` lists the values
+	// an arm covers; `const` pins a single one, which is how boolean
+	// discriminators are written -- create-terraform-vm's export_and_encrypt
+	// arms are `const: true` / `const: false`. Reading only `enum` silently
+	// skips every boolean-gated block, which is most of the optional ones.
+	if c, ok := disc["const"]; ok {
+		return fmt.Sprintf("%v", c) == fmt.Sprintf("%v", have)
+	}
+	allowed, ok := disc["enum"].([]interface{})
+	if !ok {
 		return false
 	}
 	for _, a := range allowed {

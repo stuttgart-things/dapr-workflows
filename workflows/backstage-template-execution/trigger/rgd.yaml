@@ -73,7 +73,13 @@ spec:
         metadata:
           name: ${schema.metadata.name}
         spec:
-          ttlSecondsAfterFinished: 300
+          # NO ttlSecondsAfterFinished. kro owns this Job: when the TTL deleted
+          # it, kro saw a managed resource missing and recreated it, and the new
+          # Job started a NEW workflow instance that scaffolded the template
+          # again. Every CR became a loop with a five-minute period -- 237
+          # scaffolder tasks in 20 hours on labda-dev-a before anyone noticed. A
+          # Complete Job that stays is the price of a CR that triggers once; it
+          # goes away with the CR.
           backoffLimit: 0
           template:
             spec:

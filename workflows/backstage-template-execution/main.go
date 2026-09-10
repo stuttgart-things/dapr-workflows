@@ -485,11 +485,22 @@ type ghWorkflowRun struct {
 //     let a new instance judge the previous attempt's finished run -- on
 //     labda-dev-a the fourth attempt read the third attempt's failure at poll
 //     1/540, gave up, and never saw its own run go green.
+// clockSkewTolerance widens the floor. notBefore comes from the cluster's clock
+// and created_at from GitHub's; if the cluster runs ahead, this attempt's own
+// run can carry a created_at slightly BEFORE the instance's start, and a hard
+// floor would discard it -- the watch would then poll to its timeout with the
+// right run sitting in the list.
+//
+// Thirty seconds does not reopen the stale-run hole: a previous attempt's run
+// is at least one scaffolder task plus a build older than the next instance,
+// i.e. minutes, and one that is younger was cancelled by the new push anyway.
+const clockSkewTolerance = 30 * time.Second
+
 func pickRun(runs []ghWorkflowRun, notBefore string) *ghWorkflowRun {
 	var floor time.Time
 	if notBefore != "" {
 		if t, err := time.Parse(time.RFC3339, notBefore); err == nil {
-			floor = t
+			floor = t.Add(-clockSkewTolerance)
 		}
 	}
 	for i := range runs {

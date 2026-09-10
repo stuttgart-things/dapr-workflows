@@ -68,3 +68,21 @@ func TestPickRunUnreadableCreatedAt(t *testing.T) {
 		t.Fatalf("judged a run of unknown age: %+v", *got)
 	}
 }
+
+// The cluster clock runs ahead of GitHub's: this attempt's own run reports a
+// created_at 16 s before the instance started. It is still this attempt's run.
+func TestPickRunToleratesClockSkew(t *testing.T) {
+	runs := []ghWorkflowRun{wr(34378195260, "in_progress", "", "2026-09-09T16:39:30Z")}
+	if got := pickRun(runs, "2026-09-09T16:39:46Z"); got == nil || got.ID != 34378195260 {
+		t.Fatalf("discarded this attempt's run over 16s of clock skew: %+v", got)
+	}
+}
+
+// The tolerance is a margin, not a hole: a run from minutes earlier is still an
+// earlier attempt's.
+func TestPickRunToleranceDoesNotReadmitEarlierAttempt(t *testing.T) {
+	runs := []ghWorkflowRun{wr(34376449958, "completed", "failure", "2026-09-09T16:38:00Z")}
+	if got := pickRun(runs, "2026-09-09T16:39:46Z"); got != nil {
+		t.Fatalf("tolerance readmitted a run from 106s before the start: %+v", *got)
+	}
+}

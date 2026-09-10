@@ -485,6 +485,7 @@ type ghWorkflowRun struct {
 //     let a new instance judge the previous attempt's finished run -- on
 //     labda-dev-a the fourth attempt read the third attempt's failure at poll
 //     1/540, gave up, and never saw its own run go green.
+//
 // clockSkewTolerance widens the floor. notBefore comes from the cluster's clock
 // and created_at from GitHub's; if the cluster runs ahead, this attempt's own
 // run can carry a created_at slightly BEFORE the instance's start, and a hard

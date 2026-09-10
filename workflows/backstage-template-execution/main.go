@@ -43,12 +43,16 @@ type Input struct {
 }
 
 type GitHubWatch struct {
-	Owner        string       `json:"owner"`
-	Repo         string       `json:"repo"`
-	WorkflowFile string       `json:"workflowFile"`
-	Branch       string       `json:"branch"`
-	TimeoutMin   int          `json:"timeoutMin"`
-	Merge        *MergeConfig `json:"merge,omitempty"`
+	Owner        string `json:"owner"`
+	Repo         string `json:"repo"`
+	WorkflowFile string `json:"workflowFile"`
+	Branch       string `json:"branch"`
+	TimeoutMin   int    `json:"timeoutMin"`
+	// NotBefore is stamped by the workflow, never by the caller. Runs created
+	// before this instance started belong to an earlier attempt that reused the
+	// branch name, and must not be judged as this attempt's result.
+	NotBefore string       `json:"notBefore,omitempty"`
+	Merge     *MergeConfig `json:"merge,omitempty"`
 }
 
 type MergeConfig struct {
@@ -61,6 +65,9 @@ type MergeConfig struct {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func BackstageTemplateWorkflow(ctx *workflow.WorkflowContext) (any, error) {
+	// The orchestration clock: replay-safe, and earlier than any GitHub run this
+	// instance can cause, since those only exist after the scaffolder pushes.
+	startedAt := ctx.CurrentTimeUTC().Format(time.RFC3339)
 	var in Input
 	if err := ctx.GetInput(&in); err != nil {
 		return nil, err
@@ -128,7 +135,9 @@ scaffolderDone:
 			return nil, err
 		}
 
-		if err := ctx.CallActivity(FetchGitHubRun, workflow.WithActivityInput(*in.Watch)).Await(&ghRun); err != nil {
+		watchIn := *in.Watch
+		watchIn.NotBefore = startedAt
+		if err := ctx.CallActivity(FetchGitHubRun, workflow.WithActivityInput(watchIn)).Await(&ghRun); err != nil {
 			return nil, fmt.Errorf("fetch gh run: %w", err)
 		}
 
@@ -426,39 +435,13 @@ func FetchGitHubRun(ctx workflow.ActivityContext) (any, error) {
 	}
 
 	var parsed struct {
-		WorkflowRuns []struct {
-			ID         int64  `json:"id"`
-			Status     string `json:"status"`
-			Conclusion string `json:"conclusion"`
-			HTMLURL    string `json:"html_url"`
-			HeadBranch string `json:"head_branch"`
-			CreatedAt  string `json:"created_at"`
-		} `json:"workflow_runs"`
+		WorkflowRuns []ghWorkflowRun `json:"workflow_runs"`
 	}
 	if err := json.Unmarshal(raw, &parsed); err != nil {
 		return nil, err
 	}
 
-	// API returns most recent first. Skip runs that completed with conclusion
-	// "skipped" — pr-vm-deploy.yaml fires on PR open before labels are applied,
-	// so the first run is always skipped; the real run comes after the label
-	// workflow re-triggers it.
-	var picked *struct {
-		ID         int64  `json:"id"`
-		Status     string `json:"status"`
-		Conclusion string `json:"conclusion"`
-		HTMLURL    string `json:"html_url"`
-		HeadBranch string `json:"head_branch"`
-		CreatedAt  string `json:"created_at"`
-	}
-	for i := range parsed.WorkflowRuns {
-		r := parsed.WorkflowRuns[i]
-		if r.Status == "completed" && r.Conclusion == "skipped" {
-			continue
-		}
-		picked = &r
-		break
-	}
+	picked := pickRun(parsed.WorkflowRuns, w.NotBefore)
 	if picked == nil {
 		// No real run yet — keep polling.
 		return &GitHubRunStatus{Status: "pending", HeadBranch: w.Branch}, nil
@@ -474,6 +457,55 @@ func FetchGitHubRun(ctx workflow.ActivityContext) (any, error) {
 	slog.Info("github run",
 		"id", out.ID, "status", out.Status, "conclusion", out.Conclusion, "url", out.HTMLURL)
 	return out, nil
+}
+
+// ghWorkflowRun is one entry of GET /repos/{o}/{r}/actions/workflows/{f}/runs.
+type ghWorkflowRun struct {
+	ID         int64  `json:"id"`
+	Status     string `json:"status"`
+	Conclusion string `json:"conclusion"`
+	HTMLURL    string `json:"html_url"`
+	HeadBranch string `json:"head_branch"`
+	CreatedAt  string `json:"created_at"`
+}
+
+// pickRun chooses the run this instance should judge, or nil to keep polling.
+// The API lists most recent first, so the first eligible entry is the newest.
+//
+// Three kinds of run are NOT a verdict on this attempt:
+//
+//   - skipped: pr-vm-deploy.yaml fires on PR open before labels are applied,
+//     so the first run is always skipped and the real one follows.
+//   - cancelled: the pipeline commits its generated OpenBao secrets back to the
+//     branch, which cancels its own in-flight run via cancel-in-progress. The
+//     successor is the real run. A run a human cancelled also lands here and
+//     simply polls until the watch times out, which is the safe direction.
+//   - created before notBefore: it belongs to an EARLIER attempt. Every attempt
+//     at the same cluster reuses the branch name, and filtering by branch alone
+//     let a new instance judge the previous attempt's finished run -- on
+//     labda-dev-a the fourth attempt read the third attempt's failure at poll
+//     1/540, gave up, and never saw its own run go green.
+func pickRun(runs []ghWorkflowRun, notBefore string) *ghWorkflowRun {
+	var floor time.Time
+	if notBefore != "" {
+		if t, err := time.Parse(time.RFC3339, notBefore); err == nil {
+			floor = t
+		}
+	}
+	for i := range runs {
+		r := runs[i]
+		if r.Status == "completed" && (r.Conclusion == "skipped" || r.Conclusion == "cancelled") {
+			continue
+		}
+		if !floor.IsZero() {
+			created, err := time.Parse(time.RFC3339, r.CreatedAt)
+			if err != nil || created.Before(floor) {
+				continue
+			}
+		}
+		return &r
+	}
+	return nil
 }
 
 // unfinishedChecks names every check run on `sha` that is not a green light:

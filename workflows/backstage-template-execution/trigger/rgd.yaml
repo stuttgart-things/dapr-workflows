@@ -95,16 +95,53 @@ spec:
                     - name: input
                       mountPath: /input
                       readOnly: true
+                  # Start once per CR, however often this Job runs.
+                  #
+                  # The instance ID is <namespace>_<name>, no longer
+                  # <name>-<epoch>. A timestamp made every run of this Job a new
+                  # instance, so every recreation of the Job -- by kro, or by
+                  # Flux re-applying a CR someone deleted -- scaffolded the
+                  # template again.
+                  #
+                  # A fixed ID alone does not stop that: Dapr 1.18 accepts a start
+                  # on an existing ID and, if the instance has finished, runs it
+                  # again with the new input (HTTP 202 both times; verified on
+                  # cicd-machinery-test5). So the Job asks first and only starts
+                  # on a clean ERR_INSTANCE_ID_NOT_FOUND. Anything else -- sidecar
+                  # not reachable, an unexpected status -- fails the Job rather
+                  # than starting blind.
+                  #
+                  # `_` because Kubernetes names cannot contain it, so no two
+                  # namespace/name pairs map to the same ID; Dapr rejects `.`.
+                  # Not metadata.uid: a CR that Flux re-creates gets a new uid,
+                  # and that is exactly the case this has to catch.
+                  #
+                  # The memory is the Dapr state store. A purged instance, or a
+                  # rebuilt cluster with an empty Redis, starts again.
                   command:
                     - sh
                     - -c
                     - |
                       set -eu
-                      INSTANCE_ID="${schema.metadata.name}-$(date +%s)"
-                      SIDECAR="http://${schema.spec.sidecarService}:${string(schema.spec.sidecarPort)}"
+                      INSTANCE_ID="${schema.metadata.namespace}_${schema.metadata.name}"
+                      WORKFLOWS="http://${schema.spec.sidecarService}:${string(schema.spec.sidecarPort)}/v1.0-beta1/workflows/dapr"
+
+                      code=$(curl -sS -o /tmp/instance.json -w '%{http_code}' "$WORKFLOWS/$INSTANCE_ID")
+                      if [ "$code" = 200 ]; then
+                        echo "instance $INSTANCE_ID already exists, not starting it again"
+                        grep -o '"runtimeStatus":"[^"]*"' /tmp/instance.json || true
+                        exit 0
+                      fi
+                      if [ "$code" != 404 ] || ! grep -q ERR_INSTANCE_ID_NOT_FOUND /tmp/instance.json; then
+                        echo "cannot tell whether $INSTANCE_ID exists (HTTP $code), refusing to start"
+                        cat /tmp/instance.json
+                        echo
+                        exit 1
+                      fi
+
                       echo "starting workflow instance: $INSTANCE_ID"
                       curl -fsS -X POST \
-                        "$SIDECAR/v1.0-beta1/workflows/dapr/${schema.spec.workflowName}/start?instanceID=$INSTANCE_ID" \
+                        "$WORKFLOWS/${schema.spec.workflowName}/start?instanceID=$INSTANCE_ID" \
                         -H "Content-Type: application/json" \
                         --data-binary @/input/input.json
                       echo

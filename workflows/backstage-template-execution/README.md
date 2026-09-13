@@ -105,7 +105,7 @@ Edit `input.json` / `input-delete.json` to change the target template,
 Note: neither `GITHUB_TOKEN` nor `BACKSTAGE_AUTH_TOKEN` are needed in shell 2.
 Both are read by the worker process in shell 1 — `BACKSTAGE_AUTH_TOKEN` is
 used as the fallback when the input JSON's `authToken` field is empty (see
-`main.go:210`), and `GITHUB_TOKEN` is read by the `FetchGitHubRun` /
+`CallScaffolder` in `main.go`), and `GITHUB_TOKEN` is read by the `FetchGitHubRun` /
 `MergePullRequest` activities at run time.
 
 ### dryRun semantics
@@ -155,23 +155,38 @@ Output:
 > handles content fetching itself there — the worker doesn't need to bundle
 > anything.
 
-### Gotcha: parameter defaults aren't applied on API calls
+### Schema defaults are filled in by the worker
 
 Backstage's scaffolder only populates a template's schema `default:` values
-when a user submits the template via the **UI form**. When you call
-`/api/scaffolder/v2/tasks` directly (which this worker does), any parameter
-you omit arrives at the template as **`undefined`**, even if its schema
-declares a default. Nunjucks expressions like
-`{% if "foo" in collections %}` then throw:
+when a user submits the template via the **UI form**. `/api/scaffolder/v2/tasks`
+does not, so a parameter the caller omits arrives unset even when its schema
+declares a default. On `create-terraform-vm` that rendered an empty S3 backend
+and an empty vSphere template, datastore and network.
+
+The worker repairs this before it calls the scaffolder, on the real path and
+the dryRun path alike (`applySchemaDefaults` in `main.go`):
+
+- every `default:` under `spec.parameters[].properties` that the input leaves
+  out is filled in
+- `dependencies` are followed, including the `oneOf` branch selected by a value
+  already chosen (`lab: LabDA` picks the vSphere block and its defaults) and
+  branches nested inside that one
+- a value the input sets is never overwritten — an explicit `""` stays empty
+
+The worker log line `filled schema defaults the caller did not supply` reports
+how many were added.
+
+So `values:` only needs what differs from the template's defaults, plus
+required parameters that have none. Not covered: a parameter with **no** schema
+`default:` that template content still references. It arrives unset, and
+Nunjucks expressions like `{% if "foo" in collections %}` then throw:
 
 ```
 Error: Cannot use "in" operator to search for "foo" in unexpected types.
 ```
 
-**Always pass every parameter you reference in template content explicitly
-in your `values:` block, even if it just mirrors the schema default.** Easy
-to crib defaults straight out of the template's `template.yaml`. Surfaces in
-the task event log under the failing step.
+Pass such parameters explicitly. The error surfaces in the task event log under
+the failing step.
 
 ### Inspecting a failed task
 

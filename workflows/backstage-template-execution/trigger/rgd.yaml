@@ -64,8 +64,8 @@ spec:
             ${json.marshal(has(schema.spec.watch) ? {"backstageURL": schema.spec.backstageURL, "templateRef": schema.spec.templateRef, "dryRun": schema.spec.dryRun, "values": schema.spec.values, "watch": schema.spec.watch} : {"backstageURL": schema.spec.backstageURL, "templateRef": schema.spec.templateRef, "dryRun": schema.spec.dryRun, "values": schema.spec.values})}
 
     # Trigger Job — mounts the ConfigMap and POSTs it to the dapr sidecar.
-    # TTL auto-cleans the Job 5 min after completion; delete the
-    # BackstageTemplateRun CR to tear both CM + Job down immediately.
+    # It stays Complete until the BackstageTemplateRun CR is deleted, which
+    # tears down both CM + Job. Why there is no TTL: see spec below.
     - id: trigger
       template:
         apiVersion: batch/v1

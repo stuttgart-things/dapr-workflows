@@ -116,6 +116,12 @@ The memory behind this is the Dapr state store. If the instance has been
 purged — or the cluster was rebuilt with an empty Redis — a CR that is still in
 git starts a new run when Flux applies it again.
 
+That is what `notAfter` is for. It is the part of the memory that travels with
+the CR: past that UTC deadline the Job logs `notAfter … has passed` and starts
+nothing, and a value it cannot parse fails the Job. Whatever renders CRs into
+git should stamp one — the `request-vm` Backstage template in
+stuttgart-things sets seven days after the request.
+
 ## Watching status
 
 The CR's `.status` mirrors the trigger Job, so it only says whether the POST to
@@ -154,6 +160,7 @@ curl -s -X POST "http://localhost:3500/v1.0-beta1/workflows/dapr/$ID/purge"   # 
 | `values` | object | *required* | Free-form map — shape depends on the template. Schema defaults are filled in by the worker |
 | `dryRun` | boolean | `true` | Worker stops before any mutating step |
 | `watch` | object | *optional* | GitHub Actions watch config, see below. Omit to stop after the scaffolder task |
+| `notAfter` | string | `""` | UTC deadline, `YYYY-MM-DDTHH:MM:SSZ`. Past it the Job starts nothing. Empty means no deadline |
 | `backstageURL` | string | `""` | Empty means the worker's `BACKSTAGE_URL` |
 | `workflowName` | string | `BackstageTemplateWorkflow` | Dapr workflow name registered by the worker. The payload is fixed to this workflow's input shape, so `GateAndMergeWorkflow` is **not** reachable through this CR |
 | `sidecarService` | string | `backstage-template-execution-dapr.backstage-workflows.svc.cluster.local` | In-cluster DNS of the daprd sidecar service |

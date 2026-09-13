@@ -43,6 +43,13 @@ spec:
       # watch -- fail schema validation, so the only way to try the trigger
       # path was to invent a watch block that nothing reads.
       watch: object | required=false description="GitHub Actions watch config (owner/repo/workflowFile/branch/timeoutMin/merge). Omit to stop after the scaffolder task completes."
+      # A CR kept in git outlives the state store that remembers it ran: a
+      # rebuilt cluster has an empty Redis, Flux applies every CR still in the
+      # repository, and the existence check below finds nothing. notAfter is the
+      # part of that memory that travels with the CR -- whoever renders it
+      # stamps a deadline, and past it the Job refuses to start. default="" for
+      # the same reason as backstageURL: an unset key fails the expression.
+      notAfter: string | default="" description="UTC deadline, YYYY-MM-DDTHH:MM:SSZ. After it the trigger Job does not start the workflow. Empty means no deadline."
 
     status:
       jobName: ${trigger.metadata.name}
@@ -118,6 +125,15 @@ spec:
                   #
                   # The memory is the Dapr state store. A purged instance, or a
                   # rebuilt cluster with an empty Redis, starts again.
+                  #
+                  # notAfter (see the schema) is checked before anything else, and
+                  # arrives as an environment variable rather than spliced into the
+                  # script: it is free text from the CR. printenv, because an empty
+                  # value may reach the container as no variable at all, and the
+                  # ${VAR:-} way around set -u would read as a kro expression.
+                  env:
+                    - name: NOT_AFTER
+                      value: ${schema.spec.notAfter}
                   command:
                     - sh
                     - -c
@@ -125,6 +141,18 @@ spec:
                       set -eu
                       INSTANCE_ID="${schema.metadata.namespace}_${schema.metadata.name}"
                       WORKFLOWS="http://${schema.spec.sidecarService}:${string(schema.spec.sidecarPort)}/v1.0-beta1/workflows/dapr"
+
+                      not_after=$(printenv NOT_AFTER || true)
+                      if [ -n "$not_after" ]; then
+                        if ! deadline=$(date -u -D '%Y-%m-%dT%H:%M:%SZ' -d "$not_after" +%s 2>/dev/null); then
+                          echo "notAfter '$not_after' is not YYYY-MM-DDTHH:MM:SSZ, refusing to start"
+                          exit 1
+                        fi
+                        if [ "$(date -u +%s)" -gt "$deadline" ]; then
+                          echo "notAfter $not_after has passed, not starting $INSTANCE_ID"
+                          exit 0
+                        fi
+                      fi
 
                       code=$(curl -sS -o /tmp/instance.json -w '%{http_code}' "$WORKFLOWS/$INSTANCE_ID")
                       if [ "$code" = 200 ]; then

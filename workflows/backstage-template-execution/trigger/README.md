@@ -20,7 +20,23 @@ The CR carries no secrets and no lab-specific plumbing. `BACKSTAGE_AUTH_TOKEN`,
 
 ## Install the RGD
 
-The RGD is applied by hand, not by Flux. Re-apply it after changing `rgd.yaml`:
+Every release publishes `rgd.yaml` as its own artifact, next to the worker's
+kustomize base and under the same release tag with a `-trigger` suffix:
+
+```
+oci://ghcr.io/stuttgart-things/dapr-backstage-template-execution-kustomize:<release-tag>          # worker
+oci://ghcr.io/stuttgart-things/dapr-backstage-template-execution-kustomize:<release-tag>-trigger  # this RGD
+```
+
+The artifact holds `rgd.yaml` and a `kustomization.yaml` listing only it —
+never `examples/`, which are real requests: applied, they build VMs.
+
+On a Flux cluster, select the `dapr-workflows-trigger` component of the
+stuttgart-things/flux cicd bundle. It pins the same release tag as the worker,
+so the RGD and the worker it calls cannot drift apart, and it orders itself
+behind `kro` and `dapr-workflows`.
+
+Without Flux, apply it by hand and re-apply after changing `rgd.yaml`:
 
 ```bash
 kubectl apply -f rgd.yaml

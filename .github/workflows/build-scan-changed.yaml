@@ -302,6 +302,67 @@ jobs:
           artifact-ref: ${{ matrix.kustomize_repo }}:${{ needs.plan.outputs.release_tag }}
           registry-token: ${{ secrets.GITHUB_TOKEN }}
 
+      # The kro RGD behind BackstageTemplateRun, published next to the base.
+      #
+      # Same package, tag <release>-trigger. Same package because it is already
+      # public: a new ghcr package starts private, and flux pulls these
+      # anonymously -- the first cluster would find out with a 401. Same tag
+      # stem because the RGD and the worker are one interface (the payload the
+      # trigger Job posts is what the worker reads), and flux pins them together.
+      #
+      # Only rgd.yaml goes in, with a kustomization.yaml naming it. Never
+      # examples/: those are real requests, and applied they build VMs.
+      - name: Detect trigger RGD
+        id: trigger
+        run: |
+          set -euo pipefail
+          if [ -f "workflows/${{ matrix.dir }}/trigger/rgd.yaml" ]; then
+            echo "rgd=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "rgd=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install Flux CLI
+        if: steps.trigger.outputs.rgd == 'true'
+        uses: fluxcd/flux2/action@v2.9.5
+        with:
+          version: 2.9.5
+
+      - name: Push trigger RGD
+        if: steps.trigger.outputs.rgd == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/trigger"
+          mkdir -p "$dir"
+          cp "workflows/${{ matrix.dir }}/trigger/rgd.yaml" "$dir/rgd.yaml"
+          printf -- '---\napiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources:\n  - rgd.yaml\n' \
+            > "$dir/kustomization.yaml"
+          flux push artifact "oci://${{ matrix.kustomize_repo }}:${RELEASE_TAG}-trigger" \
+            --path "$dir" \
+            --source "${{ github.server_url }}/${{ github.repository }}" \
+            --revision "${GITHUB_REF_NAME}@sha1:${GITHUB_SHA}" \
+            --creds "${{ github.actor }}:${GITHUB_TOKEN}"
+
+      # Pull it back: the artifact must hold exactly the RGD and the
+      # kustomization naming it, byte-identical to the file in this commit.
+      - name: Verify the pushed trigger RGD
+        if: steps.trigger.outputs.rgd == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/trigger-pulled"
+          flux pull artifact "oci://${{ matrix.kustomize_repo }}:${RELEASE_TAG}-trigger" \
+            --output "$out" \
+            --creds "${{ github.actor }}:${GITHUB_TOKEN}"
+          files=$(cd "$out" && find . -type f | sort | tr '\n' ' ')
+          [ "$files" = "./kustomization.yaml ./rgd.yaml " ] \
+            || { echo "unexpected artifact content: $files"; exit 1; }
+          cmp "$out/rgd.yaml" "workflows/${{ matrix.dir }}/trigger/rgd.yaml"
+          grep -q '^kind: ResourceGraphDefinition' "$out/rgd.yaml"
+
       - name: Summary
         run: |
           {
@@ -312,6 +373,9 @@ jobs:
               echo "**Kustomize:** \`${{ matrix.kustomize_repo }}:${RELEASE_TAG}\`"
             else
               echo "**Kustomize:** _skipped — no KCL deploy dir_"
+            fi
+            if [ "${{ steps.trigger.outputs.rgd }}" = "true" ]; then
+              echo "**Trigger RGD:** \`${{ matrix.kustomize_repo }}:${RELEASE_TAG}-trigger\`"
             fi
             echo ""
             echo "Pin both in flux with tag \`${RELEASE_TAG}\`."

@@ -4,10 +4,17 @@
 # starting a BackstageTemplateWorkflow run. One small CR replaces ~60
 # lines of CM+Job boilerplate.
 #
-# Apply order:
-#   1. install kro (flux/infra/kro)
+# Delivery: each release publishes this file alone as
+#   <worker kustomize repo>:<release-tag>-trigger
+# and the stuttgart-things/flux component dapr-workflows-trigger applies it
+# behind kro. Without Flux:
+#   1. install kro (flux/cicd/kro)
 #   2. kubectl apply -f rgd.yaml                  # installs the CRD
 #   3. kubectl apply -f examples/<your-run>.yaml  # triggers a run
+#
+# Keep ${...} out of anything Flux substitutes. The expressions below are
+# kro's, and a Kustomization with postBuild.substitute would rewrite them; the
+# Kustomization that applies this artifact has none, on purpose.
 apiVersion: kro.run/v1alpha1
 kind: ResourceGraphDefinition
 metadata:

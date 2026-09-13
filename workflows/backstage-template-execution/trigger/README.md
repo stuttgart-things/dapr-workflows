@@ -90,19 +90,37 @@ kro reconciles it into:
 
 ## One CR, one run
 
-- The Job has **no** `ttlSecondsAfterFinished`. A Complete Job stays until the
-  CR is deleted. kro owns the Job: when a TTL deleted it, kro recreated it, and
-  the new Job started a new workflow instance — 237 scaffolder tasks in 20
-  hours on labda-dev-a.
-- For the same reason, **do not delete the Job by hand.** kro recreates it and
-  the new Job starts another run.
-- Re-applying an unchanged CR does nothing. Changing its `spec` does not start a
-  new run either: the Job has already run, and a Job's pod template is
-  immutable. To run again, delete the CR and create it again, or create a new
-  CR under a different name.
+The workflow instance ID is the CR's `<namespace>_<name>`, e.g.
+`backstage-workflows_create-vm-demo-1`. The trigger Job starts it only when the
+sidecar reports that no such instance exists, so a name runs once, whatever
+happens to the CR or the Job afterwards:
+
+- A Job that kro recreates — deleted by hand, or its CR deleted and re-applied
+  by Flux — finds the instance and exits without starting anything. Its log
+  says `already exists, not starting it again`.
+- Changing the CR's `spec` does not start a new run either: the Job has already
+  run, and a Job's pod template is immutable.
+- The Job has **no** `ttlSecondsAfterFinished` and stays Complete until the CR
+  is deleted. A TTL made kro recreate the Job every five minutes, and before
+  the existence check every recreation started a new run — 237 scaffolder tasks
+  in 20 hours on labda-dev-a.
+- If the sidecar cannot be asked, the Job fails instead of starting blind.
 - Deleting the CR removes the ConfigMap and the Job — nothing else. A workflow
   instance that is already running keeps going, and whatever it created (PR,
   VM) stays. To stop an instance, terminate it through the sidecar (below).
+
+To run the same thing again, create a CR under a new name. To reuse a name,
+purge its instance first (below).
+
+The memory behind this is the Dapr state store. If the instance has been
+purged — or the cluster was rebuilt with an empty Redis — a CR that is still in
+git starts a new run when Flux applies it again.
+
+That is what `notAfter` is for. It is the part of the memory that travels with
+the CR: past that UTC deadline the Job logs `notAfter … has passed` and starts
+nothing, and a value it cannot parse fails the Job. Whatever renders CRs into
+git should stamp one — the `request-vm` Backstage template in
+stuttgart-things sets seven days after the request.
 
 ## Watching status
 
@@ -111,7 +129,7 @@ the sidecar succeeded:
 
 ```bash
 kubectl -n backstage-workflows get backstagetemplaterun
-kubectl -n backstage-workflows logs job/create-vm-demo-1   # prints the instance ID
+kubectl -n backstage-workflows logs job/create-vm-demo-1   # started, or already exists
 ```
 
 For the actual workflow progress tail the worker logs:
@@ -128,8 +146,10 @@ through a port-forward:
 ```bash
 kubectl -n backstage-workflows port-forward deploy/backstage-template-execution 3500:3500 &
 
-curl -s "http://localhost:3500/v1.0-beta1/workflows/dapr/<instanceId>"
-curl -s -X POST "http://localhost:3500/v1.0-beta1/workflows/dapr/<instanceId>/terminate"
+ID=backstage-workflows_create-vm-demo-1                    # <namespace>_<name>
+curl -s "http://localhost:3500/v1.0-beta1/workflows/dapr/$ID"
+curl -s -X POST "http://localhost:3500/v1.0-beta1/workflows/dapr/$ID/terminate"
+curl -s -X POST "http://localhost:3500/v1.0-beta1/workflows/dapr/$ID/purge"   # forget it, so the name can run again
 ```
 
 ## Schema reference
@@ -140,6 +160,7 @@ curl -s -X POST "http://localhost:3500/v1.0-beta1/workflows/dapr/<instanceId>/te
 | `values` | object | *required* | Free-form map — shape depends on the template. Schema defaults are filled in by the worker |
 | `dryRun` | boolean | `true` | Worker stops before any mutating step |
 | `watch` | object | *optional* | GitHub Actions watch config, see below. Omit to stop after the scaffolder task |
+| `notAfter` | string | `""` | UTC deadline, `YYYY-MM-DDTHH:MM:SSZ`. Past it the Job starts nothing. Empty means no deadline |
 | `backstageURL` | string | `""` | Empty means the worker's `BACKSTAGE_URL` |
 | `workflowName` | string | `BackstageTemplateWorkflow` | Dapr workflow name registered by the worker. The payload is fixed to this workflow's input shape, so `GateAndMergeWorkflow` is **not** reachable through this CR |
 | `sidecarService` | string | `backstage-template-execution-dapr.backstage-workflows.svc.cluster.local` | In-cluster DNS of the daprd sidecar service |

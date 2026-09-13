@@ -354,6 +354,9 @@ jobs:
         run: |
           set -euo pipefail
           out="$RUNNER_TEMP/trigger-pulled"
+          # flux pull artifact refuses an --output directory that does not
+          # exist yet ("invalid output path ... no such file or directory").
+          mkdir -p "$out"
           flux pull artifact "oci://${{ matrix.kustomize_repo }}:${RELEASE_TAG}-trigger" \
             --output "$out" \
             --creds "${{ github.actor }}:${GITHUB_TOKEN}"

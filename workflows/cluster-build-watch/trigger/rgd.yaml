@@ -1,0 +1,134 @@
+---
+# ClusterBuildWatch — a kro ResourceGraphDefinition that starts one
+# ClusterBuildWatchWorkflow run: watch a cluster build from the GitOps sync to
+# the XR's Ready, and report every checkpoint (status ConfigMap, Teams,
+# CloudEvent webhook).
+#
+# Same shape as backstage-template-execution/trigger/rgd.yaml -- a ConfigMap
+# with the input and a Job that curls the dapr sidecar -- and the same
+# start-once guarantees, for the same reasons. The comments on the Job below
+# say only what differs; the full history is in that file.
+#
+# The CR watches, it does not drive: deleting it, or a failed run, leaves the
+# build alone.
+#
+# Keep ${...} out of anything Flux substitutes. The expressions below are
+# kro's, and a Kustomization with postBuild.substitute would rewrite them.
+apiVersion: kro.run/v1alpha1
+kind: ResourceGraphDefinition
+metadata:
+  name: cluster-build-watch
+spec:
+  schema:
+    apiVersion: v1alpha1
+    kind: ClusterBuildWatch
+    spec:
+      # Workflow addressing
+      workflowName: string | default="ClusterBuildWatchWorkflow" description="Dapr workflow name registered by the worker"
+      sidecarService: string | default="cluster-build-watch-dapr.cluster-build-watch.svc.cluster.local" description="In-cluster DNS name of the worker's daprd sidecar service"
+      sidecarPort: integer | default=3500 description="Dapr HTTP port of the sidecar"
+      triggerImage: string | default="curlimages/curl:8.11.1" description="Image used by the trigger Job"
+
+      # Workflow input -- shape is Input in ../watch.go.
+      # default="" rather than optional: the marshal below dereferences it,
+      # and kro fails an unset key outright (see the backstage RGD).
+      displayName: string | default="" description="Name in notifications. Empty means the CR's name."
+      # `object`, like the backstage RGD's `watch`, rather than a typed nested
+      # struct: that is the form proven on a live cluster, and the worker
+      # validates the fields and applies their defaults itself.
+      target: object | required=true description="The XR to follow. Keys apiVersion (default config.stuttgart-things.com/v1alpha1), resource (plural, default clusterstacks), namespace, name, stageTimeoutMin (stage to minutes), defaultStageTimeoutMin"
+      gitops: object | required=false description="Optional checkpoint before the XR. Keys kind (argocd or flux), namespace, name, revision. revision is the merge commit; without it Synced may describe the tree before the merge."
+      pollSeconds: integer | default=30 description="Seconds between observations"
+      timeoutMin: integer | default=240 description="Overall limit. Past it the watch fails. A stage over its own limit is only reported as stuck."
+      notAfter: string | default="" description="UTC deadline, YYYY-MM-DDTHH:MM:SSZ. After it the trigger Job does not start the workflow. Empty means no deadline."
+
+    status:
+      jobName: ${trigger.metadata.name}
+      succeeded: ${trigger.status.succeeded}
+      failed: ${trigger.status.failed}
+
+  resources:
+    - id: input
+      template:
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: ${schema.metadata.name}-input
+        data:
+          input.json: |
+            ${json.marshal(has(schema.spec.gitops) ? {"name": schema.spec.displayName != "" ? schema.spec.displayName : schema.metadata.name, "target": schema.spec.target, "gitops": schema.spec.gitops, "pollSeconds": schema.spec.pollSeconds, "timeoutMin": schema.spec.timeoutMin} : {"name": schema.spec.displayName != "" ? schema.spec.displayName : schema.metadata.name, "target": schema.spec.target, "pollSeconds": schema.spec.pollSeconds, "timeoutMin": schema.spec.timeoutMin})}
+
+    - id: trigger
+      template:
+        apiVersion: batch/v1
+        kind: Job
+        metadata:
+          name: ${schema.metadata.name}
+        spec:
+          # NO ttlSecondsAfterFinished: kro would recreate the deleted Job and
+          # start the watch again (the backstage RGD's 237-runs incident).
+          backoffLimit: 0
+          template:
+            spec:
+              restartPolicy: Never
+              volumes:
+                - name: input
+                  configMap:
+                    name: ${input.metadata.name}
+              containers:
+                - name: trigger
+                  image: ${schema.spec.triggerImage}
+                  volumeMounts:
+                    - name: input
+                      mountPath: /input
+                      readOnly: true
+                  # Start once per CR: instance ID <namespace>_<name>, started
+                  # only on a clean ERR_INSTANCE_ID_NOT_FOUND. The same ID also
+                  # names the status ConfigMap the worker writes
+                  # (cluster-build-watch.<namespace>.<name>).
+                  #
+                  # A watch is cheap to repeat compared with a scaffolder run,
+                  # but a second one would send every notification twice.
+                  env:
+                    - name: NOT_AFTER
+                      value: ${schema.spec.notAfter}
+                  command:
+                    - sh
+                    - -c
+                    - |
+                      set -eu
+                      INSTANCE_ID="${schema.metadata.namespace}_${schema.metadata.name}"
+                      WORKFLOWS="http://${schema.spec.sidecarService}:${string(schema.spec.sidecarPort)}/v1.0-beta1/workflows/dapr"
+
+                      not_after=$(printenv NOT_AFTER || true)
+                      if [ -n "$not_after" ]; then
+                        if ! deadline=$(date -u -D '%Y-%m-%dT%H:%M:%SZ' -d "$not_after" +%s 2>/dev/null); then
+                          echo "notAfter '$not_after' is not YYYY-MM-DDTHH:MM:SSZ, refusing to start"
+                          exit 1
+                        fi
+                        if [ "$(date -u +%s)" -gt "$deadline" ]; then
+                          echo "notAfter $not_after has passed, not starting $INSTANCE_ID"
+                          exit 0
+                        fi
+                      fi
+
+                      code=$(curl -sS -o /tmp/instance.json -w '%{http_code}' "$WORKFLOWS/$INSTANCE_ID")
+                      if [ "$code" = 200 ]; then
+                        echo "instance $INSTANCE_ID already exists, not starting it again"
+                        grep -o '"runtimeStatus":"[^"]*"' /tmp/instance.json || true
+                        exit 0
+                      fi
+                      if [ "$code" != 404 ] || ! grep -q ERR_INSTANCE_ID_NOT_FOUND /tmp/instance.json; then
+                        echo "cannot tell whether $INSTANCE_ID exists (HTTP $code), refusing to start"
+                        cat /tmp/instance.json
+                        echo
+                        exit 1
+                      fi
+
+                      echo "starting workflow instance: $INSTANCE_ID"
+                      curl -fsS -X POST \
+                        "$WORKFLOWS/${schema.spec.workflowName}/start?instanceID=$INSTANCE_ID" \
+                        -H "Content-Type: application/json" \
+                        --data-binary @/input/input.json
+                      echo
+                      echo "instance started: $INSTANCE_ID"

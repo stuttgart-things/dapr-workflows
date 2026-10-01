@@ -10,7 +10,7 @@ Component / CA wiring.
 
 | File            | Exposes                                              | Purpose |
 |-----------------|------------------------------------------------------|---------|
-| `worker.k`      | `WorkerSpec`, `buildDaprWorker`                      | Dapr-sidecar'd worker `Deployment` (no Service/probes/ports) |
+| `worker.k`      | `WorkerSpec`, `buildDaprWorker`                      | Dapr-sidecar'd worker `Deployment` (no Service/probes/ports). Optional `serviceAccountName`; unset keeps the namespace default |
 | `statestore.k`  | `RedisStateStoreSpec`, `buildRedisStateStore`        | Dapr `state.redis` Component with `secretKeyRef` password |
 | `secrets.k`     | `buildOpaqueSecret`, `secretKeyRefEnv`               | Opaque Secret + `env[].valueFrom.secretKeyRef` helper |
 | `ca.k`          | `CABundleConfig`, `buildCAConfigMap`, `caVolume`, `caVolumeMount`, `caEnv` | Optional custom CA bundle (mounted from ConfigMap or Secret) with matching volume/mount/env entries |

@@ -25,6 +25,9 @@ schema WorkerSpec:
         limits = {cpu = "500m", memory = "256Mi"}
     }
     enableAPILogging?: bool = True
+    # Unset keeps the namespace's default ServiceAccount, which is what every
+    # worker before cluster-build-watch ran as and still renders unchanged.
+    serviceAccountName?: str
 
 buildDaprWorker = lambda spec: WorkerSpec -> appsv1.Deployment {
     appsv1.Deployment {
@@ -46,6 +49,8 @@ buildDaprWorker = lambda spec: WorkerSpec -> appsv1.Deployment {
                     }
                 }
                 spec = {
+                    if spec.serviceAccountName:
+                        serviceAccountName = spec.serviceAccountName
                     volumes = spec.volumes
                     containers = [{
                         name = spec.containerName

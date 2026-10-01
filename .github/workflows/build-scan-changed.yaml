@@ -324,7 +324,7 @@ jobs:
 
       - name: Install Flux CLI
         if: steps.trigger.outputs.rgd == 'true'
-        uses: fluxcd/flux2/action@v2.9.5
+        uses: fluxcd/flux2/action@v2.9.6
         with:
           version: 2.9.5
 

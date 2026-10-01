@@ -38,7 +38,15 @@ _image = "${_imageRepo}:${_imageTag}"
 # ═══════════════════════════════════════════════════════════════════════
 # Backends
 # ═══════════════════════════════════════════════════════════════════════
-_redisHost = "redis-stack.homerun2-flux.svc.cluster.local:6379"
+# The Dapr state store. Differs per cluster (cicd-machinery-test5:
+# redis-stack.dapr-redis:6379), so it is an option, not a constant.
+_redisHost: str = option("redisHost") or "redis-stack.homerun2-flux.svc.cluster.local:6379"
+
+# The kro trigger Job starts workflows by POSTing to <app-id>-dapr:3500 from
+# its OWN pod. Dapr's default binds the sidecar HTTP API to loopback only, so
+# without this every start fails with "connection refused" (first e2e run on
+# cicd-machinery-test5, dapr-workflows#49).
+_sidecarListenAddresses: str = option("sidecarListenAddresses") or "0.0.0.0"
 
 # ═══════════════════════════════════════════════════════════════════════
 # What the worker may read
@@ -195,6 +203,7 @@ deployment = w.buildDaprWorker(w.WorkerSpec {
     appID = _name
     image = _image
     serviceAccountName = _name
+    sidecarListenAddresses = _sidecarListenAddresses
     env = _secretEnv + _trustEnv + _tokenEnv
     volumes = _trustVolumes + _tokenVolumes
     volumeMounts = _trustVolumeMounts + _tokenVolumeMounts

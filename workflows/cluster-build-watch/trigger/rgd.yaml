@@ -117,7 +117,13 @@ spec:
                         fi
                       fi
 
-                      code=$(curl -sS -o /tmp/instance.json -w '%{http_code}' "$WORKFLOWS/$INSTANCE_ID")
+                      # Retried, and only this idempotent GET: right after a worker
+                      # (re)start the sidecar is not up yet (connection refused), and a
+                      # headless <app-id>-dapr can still resolve to the terminating pod
+                      # (connect timeout). The POST below is NOT retried, so a start can
+                      # never be sent twice; once this GET answers, the sidecar is there.
+                      code=$(curl -sS --connect-timeout 5 --retry 12 --retry-delay 5 --retry-connrefused \
+                        -o /tmp/instance.json -w '%{http_code}' "$WORKFLOWS/$INSTANCE_ID")
                       if [ "$code" = 200 ]; then
                         echo "instance $INSTANCE_ID already exists, not starting it again"
                         grep -o '"runtimeStatus":"[^"]*"' /tmp/instance.json || true

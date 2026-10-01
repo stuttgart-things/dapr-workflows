@@ -1,0 +1,14 @@
+{
+  "name": "u26-kind1",
+  "gitops": {
+    "kind": "argocd",
+    "namespace": "argocd",
+    "name": "clusterstack-u26-kind1"
+  },
+  "target": {
+    "namespace": "crossplane-system",
+    "name": "u26-kind1"
+  },
+  "pollSeconds": 15,
+  "timeoutMin": 240
+}

@@ -1,4 +1,5 @@
 workflows/golden-image-workflow/golden-image-workflow
 workflows/backstage-template-execution/backstage-template-execution
+workflows/cluster-build-watch/cluster-build-watch
 .claude/
 .task/

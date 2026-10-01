@@ -12,6 +12,7 @@ This repository contains Dapr durable workflows that orchestrate infrastructure 
 |----------|-------------|--------|
 | golden-image-build | Render → packer build → test VM → promote golden image | Planned |
 | backstage-template-execution | Trigger Backstage scaffolder templates, poll the task to completion, optionally watch a follow-up GitHub Actions run, and auto-merge the resulting PR | Working |
+| [cluster-build-watch](workflows/cluster-build-watch/README.md) | Watch a cluster build from the GitOps sync (Argo CD / Flux) through the Crossplane XR's `status.stage` to Ready; report every checkpoint and every stuck stage to a status ConfigMap, Teams and a CloudEvent webhook | Prototype |
 
 ### backstage-template-execution
 

@@ -1,0 +1,24 @@
+{
+  "name": "app-dev",
+  "gitops": {
+    "kind": "flux",
+    "namespace": "flux-system",
+    "name": "machinery-xrs",
+    "source": "machinery",
+    "machinery": {
+      "server": "machinery-grpc.machinery.4sthings.tiab.ssc.sva.de:443",
+      "kind": "Kustomization"
+    }
+  },
+  "target": {
+    "namespace": "default",
+    "name": "app-dev",
+    "source": "machinery",
+    "machinery": {
+      "server": "machinery-grpc.machinery.4sthings.tiab.ssc.sva.de:443",
+      "kind": "ClusterStack"
+    }
+  },
+  "pollSeconds": 30,
+  "timeoutMin": 240
+}

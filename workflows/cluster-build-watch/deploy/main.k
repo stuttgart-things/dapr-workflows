@@ -9,6 +9,8 @@ backstage-template-execution, plus the one this worker adds:
                              STATUS_WEBHOOK_URL (Secrets + secretKeyRef)
   3. RBAC                  — READ the objects it watches cluster-wide,
                              WRITE only ConfigMaps in its own namespace
+  4. TLS trust + machinery — the cluster's trust-manager bundle as
+                             SSL_CERT_FILE, an optional machinery token
 """
 
 import k8s.api.core.v1 as corev1
@@ -16,6 +18,7 @@ import k8s.api.rbac.v1 as rbacv1
 import deploy_base.worker as w
 import deploy_base.statestore as s
 import deploy_base.secrets as sec
+import deploy_base.ca as ca
 import manifests
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -44,6 +47,11 @@ _redisHost = "redis-stack.homerun2-flux.svc.cluster.local:6379"
 # name, so it needs neither list nor watch. Add an XR group here before
 # pointing a ClusterBuildWatch at it -- a missing grant is a 403, which the
 # watch reports as "observe failed" until its timeout, never as "not found".
+#
+# Only source kube uses these grants. A watch with source machinery on both
+# sides reads nothing from this API server, and a worker that only ever runs
+# such watches could drop the ClusterRole; the status Role below stays either
+# way. Kept by default so source kube works out of the box.
 _readRules = [
     {apiGroups = ["argoproj.io"], resources = ["applications"], verbs = ["get"]}
     {apiGroups = ["kustomize.toolkit.fluxcd.io"], resources = ["kustomizations"], verbs = ["get"]}
@@ -95,7 +103,59 @@ stateStore = s.buildRedisStateStore(s.RedisStateStoreSpec {
 })
 
 # ═══════════════════════════════════════════════════════════════════════
-# 4. RBAC
+# 4. TLS trust (source machinery, and every HTTPS sink)
+# ═══════════════════════════════════════════════════════════════════════
+# A machinery endpoint behind the lab gateway presents a certificate of the
+# lab CA, which the image's system pool does not know. trust-manager
+# distributes a bundle (system CAs + lab CAs) as a ConfigMap into the
+# namespace; mounting it and pointing SSL_CERT_FILE at it makes Go trust it.
+#
+# SSL_CERT_FILE REPLACES the system pool for every TLS client in the worker,
+# Teams and the CloudEvent webhook included. Fine with a trust-manager bundle,
+# which carries the system CAs; do not point it at a bundle with lab CAs only.
+#
+# On by default. The ConfigMap is NOT rendered here (trust-manager owns it);
+# without it in the namespace the pod stays in ContainerCreating, which is
+# louder than a TLS error per poll. -D trustBundle=false switches it off,
+# -D trustBundleConfigMap=<name> / trustBundleKey=<key> point elsewhere.
+_trustBundle: bool = option("trustBundle", type="bool", default=True)
+_trustCfg = ca.CABundleConfig {
+    enable = _trustBundle
+    source = "configmap"
+    namespace = _namespace
+    name = option("trustBundleConfigMap") or "cluster-trust-bundle"
+    fileName = option("trustBundleKey") or "trust-bundle.pem"
+    mountPath = "/etc/ssl/cluster-trust-bundle"
+}
+_trustVolumes = [ca.caVolume(_trustCfg)] if _trustCfg.enable else []
+_trustVolumeMounts = [ca.caVolumeMount(_trustCfg)] if _trustCfg.enable else []
+_trustEnv = [ca.caEnv(_trustCfg)] if _trustCfg.enable else []
+
+# Optional bearer token for a machinery server with auth enabled. Off by
+# default (machinery runs without auth today). -D machineryTokenSecret=<name>
+# mounts key `token` of that Secret -- provided by you, e.g. SOPS, never
+# rendered here -- and the worker reads it per call from
+# MACHINERY_AUTH_TOKEN_FILE. A file rather than secretKeyRef env, because env
+# is frozen at pod start and a mounted Secret is not: a rotated token takes
+# effect without a restart.
+_machineryTokenSecret: str = option("machineryTokenSecret") or ""
+_machineryTokenDir = "/var/run/secrets/machinery"
+_tokenVolumes = [{
+    name = "machinery-token"
+    secret = {secretName = _machineryTokenSecret, items = [{key = "token", path = "token"}]}
+}] if _machineryTokenSecret else []
+_tokenVolumeMounts = [{
+    name = "machinery-token"
+    mountPath = _machineryTokenDir
+    readOnly = True
+}] if _machineryTokenSecret else []
+_tokenEnv = [{
+    name = "MACHINERY_AUTH_TOKEN_FILE"
+    value = "${_machineryTokenDir}/token"
+}] if _machineryTokenSecret else []
+
+# ═══════════════════════════════════════════════════════════════════════
+# 5. RBAC
 # ═══════════════════════════════════════════════════════════════════════
 serviceAccount = corev1.ServiceAccount {
     metadata = {name = _name, namespace = _namespace}
@@ -127,7 +187,7 @@ statusRoleBinding = rbacv1.RoleBinding {
 }
 
 # ═══════════════════════════════════════════════════════════════════════
-# 5. Worker Deployment
+# 6. Worker Deployment
 # ═══════════════════════════════════════════════════════════════════════
 deployment = w.buildDaprWorker(w.WorkerSpec {
     name = _name
@@ -135,7 +195,9 @@ deployment = w.buildDaprWorker(w.WorkerSpec {
     appID = _name
     image = _image
     serviceAccountName = _name
-    env = _secretEnv
+    env = _secretEnv + _trustEnv + _tokenEnv
+    volumes = _trustVolumes + _tokenVolumes
+    volumeMounts = _trustVolumeMounts + _tokenVolumeMounts
 })
 
 # ═══════════════════════════════════════════════════════════════════════

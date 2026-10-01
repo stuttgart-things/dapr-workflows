@@ -1,0 +1,35 @@
+---
+# Watch a ClusterStack on the machinery cluster through its machinery gRPC
+# endpoint, rather than through the API server the worker runs on: first until
+# the Flux Kustomization machinery-xrs has applied the merge commit, then
+# through the XR's stages to Ready.
+#
+# Read-only, like every ClusterBuildWatch. The worker needs no RBAC on the
+# machinery cluster, only TLS trust for the lab CA (the deploy mounts the
+# trust-manager bundle as SSL_CERT_FILE).
+#
+# Adjust the ClusterStack name and the revision to your build.
+apiVersion: kro.run/v1alpha1
+kind: ClusterBuildWatch
+metadata:
+  name: app-dev
+  namespace: cluster-build-watch
+spec:
+  displayName: app-dev (machinery)
+  gitops:
+    kind: flux
+    namespace: flux-system
+    name: machinery-xrs
+    revision: 0123456789abcdef0123456789abcdef01234567  # pragma: allowlist secret (the merge commit)
+    source: machinery
+    machinery:
+      server: machinery-grpc.machinery.4sthings.tiab.ssc.sva.de:443
+      # kind defaults to Kustomization
+  target:
+    namespace: default
+    name: app-dev
+    source: machinery
+    machinery:
+      server: machinery-grpc.machinery.4sthings.tiab.ssc.sva.de:443
+      # kind defaults to ClusterStack
+  timeoutMin: 240

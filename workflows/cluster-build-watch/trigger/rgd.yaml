@@ -36,8 +36,13 @@ spec:
       # `object`, like the backstage RGD's `watch`, rather than a typed nested
       # struct: that is the form proven on a live cluster, and the worker
       # validates the fields and applies their defaults itself.
-      target: object | required=true description="The XR to follow. Keys apiVersion (default config.stuttgart-things.com/v1alpha1), resource (plural, default clusterstacks), namespace, name, stageTimeoutMin (stage to minutes), defaultStageTimeoutMin"
-      gitops: object | required=false description="Optional checkpoint before the XR. Keys kind (argocd or flux), namespace, name, revision. revision is the merge commit; without it Synced may describe the tree before the merge."
+      #
+      # source / machinery (where a side is read from) live INSIDE target and
+      # gitops, not as top-level fields: the objects pass through to the
+      # worker unchanged, so the new keys need no default="" and no has() in
+      # the marshal below, and a CR without them renders exactly as before.
+      target: object | required=true description="The XR to follow. Keys apiVersion (default config.stuttgart-things.com/v1alpha1), resource (plural, default clusterstacks), namespace, name, stageTimeoutMin (stage to minutes), defaultStageTimeoutMin, source (kube or machinery, default kube), machinery (server as host and port, kind default ClusterStack, plaintext for in-cluster only)"
+      gitops: object | required=false description="Optional checkpoint before the XR. Keys kind (argocd or flux), namespace, name, revision, source (kube or machinery; machinery needs kind flux), machinery (server, kind default Kustomization, plaintext). revision is the merge commit; without it Synced may describe the tree before the merge."
       pollSeconds: integer | default=30 description="Seconds between observations"
       timeoutMin: integer | default=240 description="Overall limit. Past it the watch fails. A stage over its own limit is only reported as stuck."
       notAfter: string | default="" description="UTC deadline, YYYY-MM-DDTHH:MM:SSZ. After it the trigger Job does not start the workflow. Empty means no deadline."

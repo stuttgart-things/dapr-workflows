@@ -23,6 +23,20 @@ The release publishes it like the backstage RGD:
 kubectl apply -f examples/watch-clusterstack.yaml
 ```
 
+To read the build through a machinery gRPC endpoint instead of the worker's
+own API server (e.g. a ClusterStack on the machinery cluster), set
+`source: machinery` and `machinery.server` inside `target` and/or `gitops`:
+
+```bash
+kubectl apply -f examples/watch-machinery.yaml
+```
+
+The two keys sit inside the `target` and `gitops` objects, which kro passes
+through to the worker as they are. So they need no `default=""` and no
+`has()` in the RGD, and a CR without them renders the same input as before.
+Argo CD (`gitops.kind: argocd`) cannot be read through machinery; the worker
+rejects that combination at start.
+
 Only `target.namespace` and `target.name` are required. Everything else is
 described in the [workflow README](../README.md#start-a-watch). Unlike a
 `BackstageTemplateRun`, a `ClusterBuildWatch` only reads, so applying the

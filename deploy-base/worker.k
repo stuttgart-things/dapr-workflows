@@ -28,6 +28,12 @@ schema WorkerSpec:
     # Unset keeps the namespace's default ServiceAccount, which is what every
     # worker before cluster-build-watch ran as and still renders unchanged.
     serviceAccountName?: str
+    # dapr.io/sidecar-listen-addresses. Unset keeps Dapr's default (loopback
+    # only), so the sidecar's HTTP API is reachable from inside the pod alone.
+    # A worker whose workflows are started from ANOTHER pod -- a kro trigger
+    # Job POSTing to <app-id>-dapr:3500 -- needs "0.0.0.0", or every start
+    # fails with "connection refused" while the worker looks healthy.
+    sidecarListenAddresses?: str
 
 buildDaprWorker = lambda spec: WorkerSpec -> appsv1.Deployment {
     appsv1.Deployment {
@@ -46,6 +52,8 @@ buildDaprWorker = lambda spec: WorkerSpec -> appsv1.Deployment {
                         "dapr.io/enabled" = "true"
                         "dapr.io/app-id" = spec.appID
                         "dapr.io/enable-api-logging" = "true" if spec.enableAPILogging else "false"
+                        if spec.sidecarListenAddresses:
+                            "dapr.io/sidecar-listen-addresses" = spec.sidecarListenAddresses
                     }
                 }
                 spec = {

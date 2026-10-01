@@ -21,6 +21,21 @@ Only `source: kube` needs the ClusterRole. A worker that only runs watches
 with `source: machinery` on both sides reads nothing from its own API server
 and could drop it; the status Role is needed either way.
 
+## Cluster-specific options
+
+| Option (`-D`) | Default | |
+|---|---|---|
+| `imageTag` | `unreleased` | release tag of `dapr-cluster-build-watch` |
+| `redisHost` | `redis-stack.homerun2-flux.svc.cluster.local:6379` | Dapr state store; on cicd-machinery-test5 `redis-stack.dapr-redis:6379` |
+| `sidecarListenAddresses` | `0.0.0.0` | `dapr.io/sidecar-listen-addresses` |
+
+**Why `0.0.0.0`:** the kro trigger Job starts a watch by POSTing to
+`cluster-build-watch-dapr:3500` from its own pod. Dapr binds the sidecar's
+HTTP API to loopback by default, so without it every start fails with
+`connection refused` while the worker looks perfectly healthy (first e2e run,
+dapr-workflows#49). backstage-template-execution gets the same annotation
+from a Flux patch in stuttgart-things/flux.
+
 ## TLS trust and the machinery token
 
 | Option (`-D`) | Default | |

@@ -134,55 +134,87 @@ var gitOpsKinds = map[string]struct{ apiVersion, resource string }{
 	"flux":   {"kustomize.toolkit.fluxcd.io/v1", "kustomizations"},
 }
 
+// ObserveGitOps reads the Argo CD Application or Flux Kustomization, from the
+// local API server (source kube) or a machinery endpoint (source machinery).
 func ObserveGitOps(ctx workflow.ActivityContext) (any, error) {
 	var t GitOpsTarget
 	if err := ctx.GetInput(&t); err != nil {
 		return nil, fmt.Errorf("get input: %w", err)
 	}
-	kind, ok := gitOpsKinds[t.Kind]
-	if !ok {
-		return nil, fmt.Errorf("unknown gitops kind %q", t.Kind)
-	}
-	k, err := newKube()
-	if err != nil {
-		return nil, err
-	}
-	obj, err := k.get(resourcePath(kind.apiVersion, kind.resource, t.Namespace, t.Name))
-	if err != nil {
-		return nil, err
-	}
-	if obj == nil {
-		return &GitOpsObservation{}, nil
-	}
 	var o GitOpsObservation
-	if t.Kind == "flux" {
-		o = parseFluxKustomization(obj, t.Revision)
+	var err error
+	if t.fromMachinery() {
+		o, err = observeGitOpsMachinery(activityContext(ctx), t)
 	} else {
-		o = parseArgoApplication(obj, t.Revision)
+		o, err = observeGitOpsKube(t)
 	}
-	slog.Info("gitops", "kind", t.Kind, "name", t.Name, "synced", o.Synced, "revision", o.Revision, "health", o.Health)
+	if err != nil {
+		return nil, err
+	}
+	slog.Info("gitops", "source", orDash(t.Source), "kind", t.Kind, "name", t.Name,
+		"found", o.Found, "synced", o.Synced, "revision", o.Revision, "health", o.Health)
 	return &o, nil
 }
 
+func observeGitOpsKube(t GitOpsTarget) (GitOpsObservation, error) {
+	kind, ok := gitOpsKinds[t.Kind]
+	if !ok {
+		return GitOpsObservation{}, fmt.Errorf("unknown gitops kind %q", t.Kind)
+	}
+	k, err := newKube()
+	if err != nil {
+		return GitOpsObservation{}, err
+	}
+	obj, err := k.get(resourcePath(kind.apiVersion, kind.resource, t.Namespace, t.Name))
+	if err != nil || obj == nil {
+		return GitOpsObservation{}, err
+	}
+	if t.Kind == "flux" {
+		return parseFluxKustomization(obj, t.Revision), nil
+	}
+	return parseArgoApplication(obj, t.Revision), nil
+}
+
+// ObserveXR reads the XR, from the local API server (source kube) or a
+// machinery endpoint (source machinery).
 func ObserveXR(ctx workflow.ActivityContext) (any, error) {
 	var t XRTarget
 	if err := ctx.GetInput(&t); err != nil {
 		return nil, fmt.Errorf("get input: %w", err)
 	}
+	var o XRObservation
+	var err error
+	if t.fromMachinery() {
+		o, err = observeXRMachinery(activityContext(ctx), t)
+	} else {
+		o, err = observeXRKube(t)
+	}
+	if err != nil {
+		return nil, err
+	}
+	slog.Info("xr", "source", orDash(t.Source), "resource", t.Resource, "name", t.Name,
+		"found", o.Found, "stage", o.Stage, "readyCondition", o.ReadyCondition)
+	return &o, nil
+}
+
+func observeXRKube(t XRTarget) (XRObservation, error) {
 	k, err := newKube()
 	if err != nil {
-		return nil, err
+		return XRObservation{}, err
 	}
 	obj, err := k.get(resourcePath(t.APIVersion, t.Resource, t.Namespace, t.Name))
-	if err != nil {
-		return nil, err
+	if err != nil || obj == nil {
+		return XRObservation{}, err
 	}
-	if obj == nil {
-		return &XRObservation{}, nil
+	return parseXR(obj), nil
+}
+
+// activityContext is the activity's context, cancelled when the worker stops.
+func activityContext(ctx workflow.ActivityContext) context.Context {
+	if c := ctx.Context(); c != nil {
+		return c
 	}
-	o := parseXR(obj)
-	slog.Info("xr", "resource", t.Resource, "name", t.Name, "stage", o.Stage, "readyCondition", o.ReadyCondition)
-	return &o, nil
+	return context.Background()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

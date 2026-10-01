@@ -240,8 +240,14 @@ func parseFluxKustomization(obj map[string]any, wantRevision string) GitOpsObser
 	// Ready=False with a failure reason is a degraded apply; Unknown is a
 	// reconcile in progress and not worth a notification.
 	o.Degraded = ok && ready.Status == "False" && ready.Reason != "Progressing" && ready.Reason != "DependencyNotReady"
-	if o.Degraded {
-		o.Message = ready.Reason + ": " + ready.Message
+	if ok && ready.Status != "True" && ready.Reason != "" {
+		o.Message = truncate(ready.Reason+": "+ready.Message, 300)
+		// Health is what the waiting message and a stuck notification show,
+		// so the reason goes there too. Message alone would surface only on a
+		// degraded transition, and DependencyNotReady -- the usual reason a
+		// Kustomization hangs (e.g. dependsOn machinery-fleet-state) -- is
+		// deliberately not one.
+		o.Health = ready.Status + ", " + o.Message
 	}
 	return o
 }

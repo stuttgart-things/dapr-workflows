@@ -14,6 +14,11 @@ stage hangs, and tells people and systems about it.
   merge commit)
 ```
 
+That is the standard path; the rancher and machine-pool paths are under
+[Stages](#stages). Both sides can be read from the worker's own API server or
+from a [machinery](#source-machinery) gRPC endpoint in front of another
+cluster.
+
 Why a workflow and not just events: a failure produces an event, a **hang does
 not**. Only something that waits can say "this build has been in `baseos` for
 40 minutes". Each stage has its own timeout for exactly that.
@@ -41,11 +46,46 @@ What counts as done is deliberately strict:
   true` while `Ready` stays False ("a stack can look finished and not be", see
   crossplane-configurations `bootstrap/cluster`).
 
+### Stages
+
+The XR stages are the `status.stage` values a `ClusterStack` writes (kcl
+`xplane-cluster` 0.25.1). There are three paths, depending on how the cluster
+is built:
+
+| Path | Stages |
+|---|---|
+| standard | `vm` → `baseos` → `distribution` → `kubeconfig` → `access` → `platform` → [`management-plane`] → `ready` |
+| rancher custom node | `rancher` → `vm` → `baseos` → `join` → `access` → `platform` → [`management-plane`] → `ready` |
+| machine pool | `node-ip` → `rancher` → `kubeconfig` → `access` → `platform` → [`management-plane`] → `ready` |
+
+`management-plane` is optional. `status.ready` ignores it, the Ready
+condition does not, which is one reason the watch requires both. **There is
+no failure value**: a step that fails leaves the stage where it is. That is
+exactly what the per-stage timeouts are for, and why `stuck` exists.
+
 Built-in stage timeouts (minutes, override per stage with
-`target.stageTimeoutMin`): `gitops-sync` 15, `xr-pending` 10, `xr-created`
-10, `vm` 30, `baseos` 30, `distribution` 30, `kubeconfig` 10, `access` 10,
-`platform` 45, anything else `target.defaultStageTimeoutMin` (30). The whole
-watch fails after `timeoutMin` (240).
+`target.stageTimeoutMin`):
+
+| Stage | Min | | Stage | Min |
+|---|---|---|---|---|
+| `gitops-sync` | 15 | | `kubeconfig` | 10 |
+| `xr-pending` | 10 | | `access` | 10 |
+| `xr-created` | 10 | | `platform` | 45 |
+| `vm` | 30 | | `management-plane` | 45 |
+| `baseos` | 30 | | `ready` | 10 |
+| `distribution` | 30 | | `rancher` | 30 |
+| `join` | 30 | | `node-ip` | 15 |
+
+Anything else gets `target.defaultStageTimeoutMin` (30). The whole watch fails
+after `timeoutMin` (240).
+
+`gitops-sync` stays at 15 minutes on purpose: on machinery the GitRepository
+polls every minute and a merge reaches `machinery-xrs` in 30 to 60 seconds, so
+15 minutes is already generous. A `gitops-sync` that does hang is usually a
+Kustomization whose `dependsOn` (on machinery: `machinery-fleet-state`) is not
+ready; the stuck notification carries the Ready condition's reason and
+message (`False, DependencyNotReady: dependency '...' is not ready`), so it
+says which.
 
 ## Where the status goes
 
@@ -104,8 +144,90 @@ Input fields (see `Input` in [`watch.go`](watch.go)):
 | `target.resource` | `clusterstacks` | plural |
 | `target.namespace`, `target.name` | — | required |
 | `target.stageTimeoutMin` | built-ins above | `{stage: minutes}` |
+| `target.source`, `gitops.source` | `kube` | `kube` or `machinery`, per side, see [below](#source-machinery) |
+| `target.machinery`, `gitops.machinery` | — | `{server, kind, plaintext}`, required with `source: machinery` |
 | `pollSeconds` | 30 | |
 | `timeoutMin` | 240 | |
+
+## Source machinery
+
+By default (`source: kube`) the worker GETs the objects from the API server it
+runs on, which needs the ClusterRole below and the watched objects on that
+cluster. With `source: machinery` a side is read from a
+[machinery](https://github.com/stuttgart-things/machinery) ResourceService
+instead: a read-only gRPC service (`GetResourceDetail`, release v1.14.0) in
+front of another cluster's informer cache. The worker then needs no RBAC on
+the watched cluster at all.
+
+```json
+"gitops": {
+  "kind": "flux", "namespace": "flux-system", "name": "machinery-xrs",
+  "revision": "<merge commit>",
+  "source": "machinery",
+  "machinery": {"server": "machinery-grpc.machinery.4sthings.tiab.ssc.sva.de:443"}
+},
+"target": {
+  "namespace": "default", "name": "<clusterstack>",
+  "source": "machinery",
+  "machinery": {"server": "machinery-grpc.machinery.4sthings.tiab.ssc.sva.de:443"}
+}
+```
+
+See [`input-machinery.json`](input-machinery.json) and
+[`trigger/examples/watch-machinery.yaml`](trigger/examples/watch-machinery.yaml).
+
+| Field | Default | |
+|---|---|---|
+| `machinery.server` | — | `host:port` |
+| `machinery.kind` | `ClusterStack` (target), `Kustomization` (gitops) | the kind name as configured on that machinery server |
+| `machinery.plaintext` | `false` | no TLS. For an in-cluster Service only |
+
+**What machinery has to provide.** The answer is mapped back onto the object
+the kube parsers read, so both sources are judged by the same code
+(`machineryObject` in [`machinery.go`](machinery.go)):
+
+| Parser reads | From machinery |
+|---|---|
+| `status.conditions` | `conditions` |
+| `status.stage` | info field `Stage` |
+| `status.ready` | info field `StatusReady` (`"true"` / `"false"`) |
+| `status.lastAppliedRevision` | info field `Revision` |
+
+machinery omits an info field when it is empty on the object, so a missing
+label cannot be told from a missing mapping. Where that matters it is an
+error, not a guess: a `ClusterStack` with `Ready=True` but no `StatusReady`,
+and a Kustomization that is Ready without a `Revision` while `gitops.revision`
+is set. Both show up as `observe failed` in the custom status. The machinery
+cluster's server maps all four today.
+
+**Errors.** Only gRPC `NotFound` means "not found". `InvalidArgument` (kind not
+configured on that server), `Unavailable` (CRD not served, informer not
+ready, or the connection failed) and everything else are errors, like a 403 on
+the kube path: the watch keeps its clocks running and says why in the custom
+status.
+
+**Not supported:** Argo CD. No machinery serves `Application` yet, and the
+Argo parser needs sync, health and operation state; `gitops.kind: argocd` with
+`source: machinery` is rejected when the watch starts.
+
+**TLS.** The machinery gateway presents a certificate from the lab CA. Go
+honours `SSL_CERT_FILE`, and the deploy mounts trust-manager's
+`cluster-trust-bundle` (system CAs plus lab CAs) and points it there, see
+[`deploy/`](deploy/README.md). grpc-go 1.67 and later require ALPN `h2` from
+the server; the machinery Gateway negotiates it (it did not at first, which
+showed up as a handshake error, not as a gRPC status).
+
+**Auth.** machinery runs without auth today. When it gets bearer auth, give
+the worker a token through `MACHINERY_AUTH_TOKEN_FILE` (a mounted Secret, see
+the deploy option `machineryTokenSecret`; read per call, so rotation needs no
+restart) or `MACHINERY_AUTH_TOKEN`. It is sent as `authorization: Bearer ...`,
+over TLS only, never with `plaintext: true`. The token is never part of the
+input, since the input lands in the workflow history and the status
+ConfigMap, and errors are scrubbed of it.
+
+One connection per observation: an activity makes one RPC every
+`pollSeconds`, so a pooled connection would save a TLS handshake per half
+minute at the price of lifecycle code for CA and token rotation.
 
 ## Run locally
 
@@ -126,6 +248,8 @@ dapr run --app-id cluster-build-watch --app-protocol grpc \
 
 # another shell
 ./run.sh                 # uses input.json
+./run.sh input-machinery.json   # source machinery: no kubectl proxy needed
+                                # for the watch, only for the status ConfigMap
 ./run.sh status <id>
 ```
 
@@ -137,7 +261,8 @@ dapr run --app-id cluster-build-watch --app-protocol grpc \
   Flux Kustomizations and `clusterstacks.config.stuttgart-things.com`. Add a
   rule there before watching another XR kind. A missing grant is a 403, which
   the watch reports as `observe failed` in its custom status, and never as
-  "not found".
+  "not found". Only `source: kube` uses it; a worker that only runs
+  `source: machinery` watches could do without.
 - **Role `cluster-build-watch-status`**: `get/create/patch` on ConfigMaps in
   the worker's own namespace only. The status ConfigMaps live next to the
   worker, not next to the CR.
@@ -166,10 +291,14 @@ fails with a 401.
 
 ## Not done yet
 
-- **Not run on a live cluster.** The unit tests cover the state machine, the
-  parsers, the sinks and the RGD's CEL payload (both branches, evaluated with
-  cel-go). Not covered: a real Argo CD Application, a real `ClusterStack`, a
-  real Teams webhook, kro itself.
+- **Not run on a live cluster as a workflow.** The unit tests cover the state
+  machine, the parsers, the sinks, the machinery client (in-process gRPC
+  server over bufconn) and the RGD's CEL payload (both branches, evaluated with
+  cel-go). The machinery client and mapping were run read-only against the
+  real machinery endpoint (`go test -tags live -run TestLiveMachinery`, see
+  [`machinery_live_test.go`](machinery_live_test.go)). Not covered: a full
+  workflow run under Dapr, a real Argo CD Application, a real Teams webhook,
+  kro itself.
 - **Chaining from `backstage-template-execution`.** After its merge step, that
   workflow knows the merge SHA. It could start this one, with
   `gitops.revision` filled in, instead of a human writing the CR. Cross-app

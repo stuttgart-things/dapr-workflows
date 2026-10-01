@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -119,6 +120,8 @@ type fakeActivity struct {
 	workflow.ActivityContext
 	in any
 }
+
+func (f fakeActivity) Context() context.Context { return context.Background() }
 
 func (f fakeActivity) GetInput(v any) error {
 	b, err := json.Marshal(f.in)

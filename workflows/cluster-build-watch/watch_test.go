@@ -1,6 +1,8 @@
 package main
 
 import (
+	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -197,6 +199,101 @@ func TestValidate(t *testing.T) {
 	}
 	if err := testInput(true).validate(); err != nil {
 		t.Fatalf("valid input rejected: %v", err)
+	}
+}
+
+func TestValidateSource(t *testing.T) {
+	m := func(server string) *MachinerySource { return &MachinerySource{Server: server} }
+	bad := map[string]func(*Input){
+		"unknown target source":        func(in *Input) { in.Target.Source = "etcd" },
+		"unknown gitops source":        func(in *Input) { in.GitOps.Source = "grpc" },
+		"machinery without server":     func(in *Input) { in.Target.Source = sourceMachinery; in.Target.Machinery = m("") },
+		"machinery without block":      func(in *Input) { in.Target.Source = sourceMachinery },
+		"argocd through machinery":     func(in *Input) { in.GitOps.Source = sourceMachinery; in.GitOps.Machinery = m("h:443") },
+		"machinery block, kube source": func(in *Input) { in.Target.Machinery = m("h:443") },
+	}
+	for name, mutate := range bad {
+		in := testInput(true)
+		mutate(in)
+		in.applyDefaults()
+		if in.validate() == nil {
+			t.Errorf("%s: want an error", name)
+		}
+	}
+	in := testInput(true)
+	in.GitOps.Kind = "flux"
+	in.GitOps.ObservationSource = ObservationSource{Source: sourceMachinery, Machinery: m("h:443")}
+	in.Target.ObservationSource = ObservationSource{Source: sourceMachinery, Machinery: m("h:443")}
+	in.applyDefaults()
+	if err := in.validate(); err != nil {
+		t.Fatalf("valid machinery input rejected: %v", err)
+	}
+	if in.GitOps.Machinery.Kind != "Kustomization" || in.Target.Machinery.Kind != "ClusterStack" {
+		t.Fatalf("machinery kind defaults: %+v %+v", in.GitOps.Machinery, in.Target.Machinery)
+	}
+	if err := testInput(true).validate(); err != nil || testInput(true).Target.Source != "" {
+		t.Fatalf("no source is kube, and stays unset: %v", err)
+	}
+	kube := testInput(false)
+	kube.Target.Source = sourceKube
+	if err := kube.validate(); err != nil {
+		t.Fatalf("explicit kube rejected: %v", err)
+	}
+}
+
+// The input JSON the trigger posts: source/machinery sit next to name.
+func TestMachineryInputJSON(t *testing.T) {
+	var in Input
+	raw := `{"gitops":{"kind":"flux","name":"machinery-xrs","source":"machinery","machinery":{"server":"m:443"}},
+		"target":{"namespace":"default","name":"app-dev","source":"machinery","machinery":{"server":"m:443","plaintext":true}}}`
+	if err := json.Unmarshal([]byte(raw), &in); err != nil {
+		t.Fatal(err)
+	}
+	in.applyDefaults()
+	if err := in.validate(); err != nil {
+		t.Fatal(err)
+	}
+	if !in.Target.fromMachinery() || !in.Target.Machinery.Plaintext || in.GitOps.Machinery.Server != "m:443" {
+		t.Fatalf("got %+v / %+v", in.Target, in.GitOps)
+	}
+	// An input without the fields marshals exactly as before.
+	b, _ := json.Marshal(testInput(false).Target)
+	if strings.Contains(string(b), `"source"`) || strings.Contains(string(b), `"machinery"`) {
+		t.Fatalf("kube input grew new keys: %s", b)
+	}
+}
+
+// The example inputs in this directory stay valid.
+func TestExampleInputs(t *testing.T) {
+	for _, f := range []string{"input.json", "input-machinery.json"} {
+		raw, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var in Input
+		if err := json.Unmarshal(raw, &in); err != nil {
+			t.Fatalf("%s: %v", f, err)
+		}
+		in.applyDefaults()
+		if err := in.validate(); err != nil {
+			t.Fatalf("%s: %v", f, err)
+		}
+	}
+}
+
+func TestStageTimeoutsAllPaths(t *testing.T) {
+	in := testInput(false)
+	for stage, min := range map[string]int{
+		"rancher": 30, "node-ip": 15, "join": 30, "management-plane": 45, "ready": 10,
+		"vm": 30, "baseos": 30, "distribution": 30, "kubeconfig": 10, "access": 10, "platform": 45,
+	} {
+		if got := in.stageTimeout(stage); got != time.Duration(min)*time.Minute {
+			t.Errorf("stage %s: %s, want %dm", stage, got, min)
+		}
+	}
+	in.Target.StageTimeoutMin = map[string]int{"ready": 3}
+	if in.stageTimeout("ready") != 3*time.Minute {
+		t.Fatal("an override wins over a new built-in")
 	}
 }
 

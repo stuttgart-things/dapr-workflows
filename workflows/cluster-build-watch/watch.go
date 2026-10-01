@@ -48,6 +48,9 @@ type GitOpsTarget struct {
 	// Application was in sync with the old tree and nothing has refreshed yet.
 	// Set it whenever the caller knows the merge SHA.
 	Revision string `json:"revision,omitempty"`
+
+	// Where the object is read from, see ObservationSource.
+	ObservationSource
 }
 
 // XRTarget addresses one composite resource.
@@ -62,6 +65,75 @@ type XRTarget struct {
 	StageTimeoutMin map[string]int `json:"stageTimeoutMin,omitempty"`
 	// DefaultStageTimeoutMin applies to every stage not named above.
 	DefaultStageTimeoutMin int `json:"defaultStageTimeoutMin,omitempty"`
+
+	// Where the XR is read from, see ObservationSource.
+	ObservationSource
+}
+
+const (
+	sourceKube      = "kube"
+	sourceMachinery = "machinery"
+)
+
+// ObservationSource says where one side of the watch (gitops or target) is
+// read from. Embedded, so the JSON keys sit next to name/namespace:
+//
+//	"target": {"namespace": "default", "name": "app-dev",
+//	           "source": "machinery",
+//	           "machinery": {"server": "machinery-grpc.example:443"}}
+//
+// There is no token here on purpose: the input lands in the workflow history
+// and in the status ConfigMap. The worker reads MACHINERY_AUTH_TOKEN or
+// MACHINERY_AUTH_TOKEN_FILE from its own environment (machinery.go).
+type ObservationSource struct {
+	// Source is "kube" (default: the worker GETs the object from the API
+	// server it runs against) or "machinery" (a machinery ResourceService,
+	// read-only gRPC, typically in front of another cluster).
+	Source    string           `json:"source,omitempty"`
+	Machinery *MachinerySource `json:"machinery,omitempty"`
+}
+
+// MachinerySource addresses a machinery gRPC endpoint
+// (github.com/stuttgart-things/machinery, package resourceservice).
+type MachinerySource struct {
+	// Server is host:port, e.g. machinery-grpc.machinery.example.com:443.
+	Server string `json:"server"`
+	// Kind is the resource kind as configured on that server: default
+	// ClusterStack for the target, Kustomization for gitops.
+	Kind string `json:"kind,omitempty"`
+	// Plaintext dials without TLS. For an in-cluster Service only; the auth
+	// token is never sent over a plaintext connection.
+	Plaintext bool `json:"plaintext,omitempty"`
+}
+
+// fromMachinery reports whether this side is read through machinery. An empty
+// Source means kube. It is not written back as "kube", so an input from before
+// the field existed -- and its workflow history -- stays byte-identical.
+func (s ObservationSource) fromMachinery() bool { return s.Source == sourceMachinery }
+
+func (s *ObservationSource) defaultKind(kind string) {
+	if s.fromMachinery() && s.Machinery != nil && s.Machinery.Kind == "" {
+		s.Machinery.Kind = kind
+	}
+}
+
+func (s ObservationSource) validate(field string) error {
+	switch s.Source {
+	case "", sourceKube:
+		// Most likely a forgotten `source: machinery`; reading the local API
+		// server instead would watch the wrong cluster without a word.
+		if s.Machinery != nil {
+			return fmt.Errorf("%s.machinery is set but %s.source is %q: set %s.source to machinery to use it",
+				field, field, orDash(s.Source), field)
+		}
+	case sourceMachinery:
+		if s.Machinery == nil || s.Machinery.Server == "" {
+			return fmt.Errorf("%s.machinery.server is required when %s.source is machinery", field, field)
+		}
+	default:
+		return fmt.Errorf("%s.source %q: want kube or machinery", field, s.Source)
+	}
+	return nil
 }
 
 const (
@@ -84,6 +156,16 @@ var defaultStageTimeouts = map[string]int{
 	"kubeconfig":    10,
 	"access":        10,
 	"platform":      45,
+	// The rancher custom-node and machine-pool paths of xplane-cluster.
+	"rancher": 30,
+	"node-ip": 15,
+	"join":    30,
+	// Optional step after platform. status.ready does not wait for it, the
+	// Ready condition does.
+	"management-plane": 45,
+	// The XR has written stage ready; what is left is Crossplane's Ready
+	// condition catching up. Minutes, not tens of minutes.
+	"ready": 10,
 }
 
 func (in *Input) applyDefaults() {
@@ -105,6 +187,7 @@ func (in *Input) applyDefaults() {
 	if in.Name == "" {
 		in.Name = in.Target.Name
 	}
+	in.Target.defaultKind("ClusterStack")
 	if in.GitOps != nil {
 		if in.GitOps.Kind == "" {
 			in.GitOps.Kind = "argocd"
@@ -116,6 +199,7 @@ func (in *Input) applyDefaults() {
 				in.GitOps.Namespace = "argocd"
 			}
 		}
+		in.GitOps.defaultKind("Kustomization")
 	}
 }
 
@@ -125,6 +209,9 @@ func (in *Input) validate() error {
 	}
 	if !strings.Contains(in.Target.APIVersion, "/") {
 		return fmt.Errorf("target.apiVersion %q must be group/version", in.Target.APIVersion)
+	}
+	if err := in.Target.ObservationSource.validate("target"); err != nil {
+		return err
 	}
 	if in.GitOps != nil {
 		if in.GitOps.Name == "" {
@@ -136,6 +223,14 @@ func (in *Input) validate() error {
 		// A short prefix would match the wrong commit sooner or later.
 		if r := in.GitOps.Revision; r != "" && len(r) < 7 {
 			return fmt.Errorf("gitops.revision %q: give at least 7 characters of the SHA", r)
+		}
+		if err := in.GitOps.ObservationSource.validate("gitops"); err != nil {
+			return err
+		}
+		// No machinery serves Argo CD Applications yet, and the Argo parser
+		// needs sync, health and operationState, which no info field carries.
+		if in.GitOps.fromMachinery() && in.GitOps.Kind != "flux" {
+			return fmt.Errorf("gitops.source machinery works with gitops.kind flux (Kustomization) only, not %s: read Argo CD Applications with source kube", in.GitOps.Kind)
 		}
 	}
 	return nil

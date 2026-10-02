@@ -28,6 +28,12 @@ type Input struct {
 	// Target is the Crossplane XR whose status.stage is followed.
 	Target XRTarget `json:"target"`
 
+	// Argo is the checkpoint after the XR: once it is ready, wait until the
+	// Argo CD Applications generated for the new cluster are Synced and
+	// Healthy. Optional, and even when set it only runs for a stack that
+	// registers the cluster with Argo CD (spec.rancher.argocd.register).
+	Argo *ArgoTarget `json:"argo,omitempty"`
+
 	PollSeconds int `json:"pollSeconds,omitempty"`
 	// TimeoutMin bounds the whole watch. Past it the watch FAILS; a stage that
 	// only overruns its own timeout is reported as stuck and watched on.
@@ -68,6 +74,52 @@ type XRTarget struct {
 
 	// Where the XR is read from, see ObservationSource.
 	ObservationSource
+}
+
+// ArgoTarget selects the Argo CD Applications of one cluster.
+//
+// Generated Applications carry no cluster label. The handle is the AppProject:
+// the cluster-projects ApplicationSet creates one per registered cluster,
+// named after it, and every Application generated for the cluster sits in it
+// (spec.project). A few outer Applications sit in the `default` project
+// instead and are named `<something>-<cluster>` (cert-manager-install-<c>,
+// trust-manager-install-<c>, proj-<c>); IncludeDefaultProject picks those up.
+//
+// Read through machinery only: the worker runs on a different cluster than
+// Argo CD and has no credentials there, by design.
+type ArgoTarget struct {
+	// Project is the AppProject, default the target's name (ClusterStack name
+	// = cluster name = AppProject name).
+	Project string `json:"project,omitempty"`
+	// Namespace of the Applications, default argocd.
+	Namespace string `json:"namespace,omitempty"`
+	// IncludeDefaultProject also counts default-project Applications named
+	// `*-<project>`, default true. When another project's name is a longer
+	// suffix of the Application name (`proj-app-dev` for project `dev` vs
+	// `app-dev`), it belongs to that project instead.
+	IncludeDefaultProject *bool `json:"includeDefaultProject,omitempty"`
+	// Always runs the checkpoint without looking at the stack's register flag
+	// -- for an XR that has none. Default false: only a stack whose
+	// ArgoRegister is true is waited for.
+	Always bool `json:"always,omitempty"`
+	// GraceMin is how long zero matching Applications is "not generated yet".
+	// Past it the watch FAILS: a registered cluster with nothing in its project
+	// means the wrong Argo CD, the wrong project, or a machinery that does not
+	// serve Applications -- waiting longer cannot fix any of them. Default 15.
+	GraceMin int `json:"graceMin,omitempty"`
+	// SettlePolls is how many consecutive observations must find every
+	// Application Synced + Healthy, with an unchanged count, before the watch
+	// is done. Generation is staged (an app-of-apps creates its children only
+	// once it has synced), so one all-green poll can come before the rest
+	// exists. Default 2.
+	SettlePolls int `json:"settlePolls,omitempty"`
+
+	// Where the Applications are read from; machinery only, see above.
+	ObservationSource
+}
+
+func (a *ArgoTarget) includeDefault() bool {
+	return a.IncludeDefaultProject == nil || *a.IncludeDefaultProject
 }
 
 const (
@@ -140,6 +192,7 @@ const (
 	stageGitOpsSync = "gitops-sync" // waiting for Argo CD / Flux to apply the commit
 	stageXRPending  = "xr-pending"  // synced, but the XR does not exist yet
 	stageXRCreated  = "xr-created"  // XR exists, has written no status.stage yet
+	stageArgoSync   = "argo-sync"   // XR ready, waiting for the cluster's Argo CD Applications
 )
 
 // Built-in stage timeouts, in minutes. They are generous on purpose: a stuck
@@ -166,6 +219,10 @@ var defaultStageTimeouts = map[string]int{
 	// The XR has written stage ready; what is left is Crossplane's Ready
 	// condition catching up. Minutes, not tens of minutes.
 	"ready": 10,
+	// From XR ready to every generated Application Synced + Healthy. The
+	// AppSets requeue every few minutes and the platform profiles install
+	// charts (kube-prometheus-stack, openebs, kyverno) on a fresh cluster.
+	stageArgoSync: 30,
 }
 
 func (in *Input) applyDefaults() {
@@ -201,6 +258,21 @@ func (in *Input) applyDefaults() {
 		}
 		in.GitOps.defaultKind("Kustomization")
 	}
+	if in.Argo != nil {
+		if in.Argo.Project == "" {
+			in.Argo.Project = in.Target.Name
+		}
+		if in.Argo.Namespace == "" {
+			in.Argo.Namespace = "argocd"
+		}
+		if in.Argo.GraceMin <= 0 {
+			in.Argo.GraceMin = 15
+		}
+		if in.Argo.SettlePolls <= 0 {
+			in.Argo.SettlePolls = 2
+		}
+		in.Argo.defaultKind("Application")
+	}
 }
 
 func (in *Input) validate() error {
@@ -227,10 +299,21 @@ func (in *Input) validate() error {
 		if err := in.GitOps.ObservationSource.validate("gitops"); err != nil {
 			return err
 		}
-		// No machinery serves Argo CD Applications yet, and the Argo parser
-		// needs sync, health and operationState, which no info field carries.
+		// The gitops Argo parser is not wired to machinery's Application
+		// info fields (only the argo checkpoint after ready is).
 		if in.GitOps.fromMachinery() && in.GitOps.Kind != "flux" {
 			return fmt.Errorf("gitops.source machinery works with gitops.kind flux (Kustomization) only, not %s: read Argo CD Applications with source kube", in.GitOps.Kind)
+		}
+	}
+	if in.Argo != nil {
+		if err := in.Argo.ObservationSource.validate("argo"); err != nil {
+			return err
+		}
+		// The worker has no access to the Argo CD cluster, and is not meant
+		// to: reading "kube" would look for Applications on the worker's own
+		// cluster and find none.
+		if !in.Argo.fromMachinery() {
+			return fmt.Errorf("argo.source must be machinery: Argo CD Applications are read through a machinery on the Argo CD cluster, never through the worker's API server")
 		}
 	}
 	return nil
@@ -271,6 +354,19 @@ type XRObservation struct {
 	ReadyCondition bool   `json:"readyCondition"`
 	SyncedFalse    bool   `json:"syncedFalse"` // Synced=False: a reconcile error
 	Message        string `json:"message,omitempty"`
+	// ArgoRegister is spec.rancher.argocd.register, nil when the XR has no
+	// such field or machinery does not map it.
+	ArgoRegister *bool `json:"argoRegister,omitempty"`
+}
+
+// ArgoObservation summarises the Applications of one cluster.
+type ArgoObservation struct {
+	Total int `json:"total"` // matching Applications
+	Ready int `json:"ready"` // of those, Synced AND Healthy
+	// Pending names the ones that are not, with their state, capped.
+	Pending  []string `json:"pending,omitempty"`
+	Degraded bool     `json:"degraded"` // Degraded health, a failed sync, or an *Error condition
+	Message  string   `json:"message,omitempty"`
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -306,6 +402,10 @@ type WatchState struct {
 	Degraded      bool          `json:"degraded"`
 	Message       string        `json:"message,omitempty"`
 	Stages        []StageRecord `json:"stages"`
+	// ArgoGreen counts consecutive all-green Argo observations; ArgoTotal is
+	// the Application count of the last one. See ArgoTarget.SettlePolls.
+	ArgoGreen int `json:"argoGreen,omitempty"`
+	ArgoTotal int `json:"argoTotal,omitempty"`
 	// Seq numbers the events so receivers can drop the duplicate an activity
 	// retry may deliver.
 	Seq int `json:"seq"`
@@ -419,7 +519,7 @@ func Advance(in *Input, st *WatchState, gitops *GitOpsObservation, xr *XRObserva
 			st.Message = fmt.Sprintf("waiting for %s, at %s (health: %s)", wantRev(in.GitOps.Revision), shortRev(gitops.Revision), orDash(gitops.Health))
 		}
 
-	case xr != nil && st.Stage != stageGitOpsSync:
+	case xr != nil && st.Stage != stageGitOpsSync && st.Stage != stageArgoSync:
 		if !xr.Found {
 			if st.XRSeen {
 				st.Message = "XR was deleted while the build was being watched"
@@ -433,10 +533,25 @@ func Advance(in *Input, st *WatchState, gitops *GitOpsObservation, xr *XRObserva
 		evs = append(evs, st.degradation(in, now, xr.SyncedFalse, xr.Message)...)
 
 		if xr.ReadyCondition && (xr.Ready == nil || *xr.Ready) {
+			wait, why := in.argoWanted(xr)
+			if wait {
+				// Not done yet: the watch moves on to the Applications, and
+				// the clocks below start the argo-sync stage timer.
+				prev := st.Stage
+				st.enter(stageArgoSync, now)
+				st.Message = fmt.Sprintf("XR ready, waiting for the Argo CD Applications of project %s", in.Argo.Project)
+				evs = append(evs, st.emit(in, now, "stage", sevInfo,
+					stageMessage(prev, stageArgoSync, st)+": "+st.Message))
+				break
+			}
 			st.Message = "build complete"
+			msg := fmt.Sprintf("%s is ready after %s", in.Name, now.Sub(st.StartedAt).Round(time.Second))
+			if why != "" {
+				st.Message += " (" + why + ")"
+				msg += " (" + why + ")"
+			}
 			st.finish(phaseReady, now)
-			return append(evs, st.emit(in, now, "ready", sevSuccess,
-				fmt.Sprintf("%s is ready after %s", in.Name, now.Sub(st.StartedAt).Round(time.Second))))
+			return append(evs, st.emit(in, now, "ready", sevSuccess, msg))
 		}
 
 		stage := xr.Stage
@@ -450,8 +565,76 @@ func Advance(in *Input, st *WatchState, gitops *GitOpsObservation, xr *XRObserva
 		}
 	}
 
-	// Clocks run whether or not this round observed anything: a watch whose
-	// every observation fails must still end.
+	return append(evs, st.clocks(in, now)...)
+}
+
+// argoWanted says whether the Argo checkpoint runs for this XR, and when it
+// does not although one was asked for, why -- for the ready message.
+func (in *Input) argoWanted(xr *XRObservation) (bool, string) {
+	switch {
+	case in.Argo == nil:
+		return false, ""
+	case in.Argo.Always:
+		return true, ""
+	case xr.ArgoRegister == nil:
+		return false, "argo checkpoint skipped: the XR's argocd.register is unknown -- map spec.rancher.argocd.register as ArgoRegister on machinery, or set argo.always"
+	case !*xr.ArgoRegister:
+		return false, "not registered with Argo CD, argo checkpoint skipped"
+	}
+	return true, ""
+}
+
+// AdvanceArgo is Advance for the argo-sync stage: it folds one observation of
+// the cluster's Applications into the state. argo nil means the observation
+// failed; only the clocks are checked. Deterministic, like Advance.
+func AdvanceArgo(in *Input, st *WatchState, argo *ArgoObservation, now time.Time) []Event {
+	if st.done() || st.Stage != stageArgoSync || in.Argo == nil {
+		return nil
+	}
+	var evs []Event
+	if argo != nil {
+		evs = append(evs, st.degradation(in, now, argo.Degraded, argo.Message)...)
+		allGreen := argo.Total > 0 && argo.Ready == argo.Total
+		switch {
+		case argo.Total == 0:
+			st.ArgoGreen = 0
+			grace := time.Duration(in.Argo.GraceMin) * time.Minute
+			if now.Sub(st.StageSince) >= grace {
+				st.Message = fmt.Sprintf("no Argo CD Application in project %s (namespace %s) after %d min: wrong Argo CD, wrong project, or %s does not serve Applications",
+					in.Argo.Project, in.Argo.Namespace, in.Argo.GraceMin, in.Argo.Machinery.Server)
+				st.finish(phaseFailed, now)
+				return append(evs, st.emit(in, now, "failed", sevError, st.Message))
+			}
+			st.Message = fmt.Sprintf("waiting for Applications in project %s to be generated", in.Argo.Project)
+		case allGreen:
+			if argo.Total == st.ArgoTotal {
+				st.ArgoGreen++
+			} else {
+				st.ArgoGreen = 1
+			}
+			if st.ArgoGreen >= in.Argo.SettlePolls {
+				st.ArgoTotal = argo.Total
+				st.Message = fmt.Sprintf("build complete, %d Argo CD Applications Synced + Healthy", argo.Total)
+				st.finish(phaseReady, now)
+				return append(evs, st.emit(in, now, "ready", sevSuccess,
+					fmt.Sprintf("%s is ready after %s, %d Argo CD Applications in project %s Synced + Healthy",
+						in.Name, now.Sub(st.StartedAt).Round(time.Second), argo.Total, in.Argo.Project)))
+			}
+			st.Message = fmt.Sprintf("all %d Applications Synced + Healthy, confirming (%d/%d)", argo.Total, st.ArgoGreen, in.Argo.SettlePolls)
+		default:
+			st.ArgoGreen = 0
+			st.Message = fmt.Sprintf("%d/%d Applications Synced + Healthy, waiting for %s", argo.Ready, argo.Total, strings.Join(argo.Pending, ", "))
+		}
+		st.ArgoTotal = argo.Total
+	}
+	return append(evs, st.clocks(in, now)...)
+}
+
+// clocks ends a watch past its overall timeout and reports a stage past its
+// own once. They run whether or not this round observed anything: a watch
+// whose every observation fails must still end.
+func (st *WatchState) clocks(in *Input, now time.Time) []Event {
+	var evs []Event
 	if now.Sub(st.StartedAt) >= time.Duration(in.TimeoutMin)*time.Minute {
 		st.Message = fmt.Sprintf("no result after %d min, last stage %s", in.TimeoutMin, st.Stage)
 		st.finish(phaseFailed, now)

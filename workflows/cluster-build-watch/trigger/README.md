@@ -37,6 +37,21 @@ through to the worker as they are. So they need no `default=""` and no
 Argo CD (`gitops.kind: argocd`) cannot be read through machinery; the worker
 rejects that combination at start.
 
+To wait, after the XR is ready, for the new cluster's Argo CD Applications
+(only for a stack with `spec.rancher.argocd.register: true`), add an `argo`
+object with `source: machinery` and the server of a machinery on the Argo CD
+cluster:
+
+```bash
+kubectl apply -f examples/watch-argo.yaml
+```
+
+`argo` is optional like `gitops`; the RGD marshals one of four input shapes
+with `has()`, so a CR without it renders the same input as before. Note that
+updating the RGD re-renders the trigger Job of every existing
+`ClusterBuildWatch`, whose `spec.template` is immutable: finished instances go
+to ERROR (harmless, see dapr-workflows#49).
+
 Only `target.namespace` and `target.name` are required. Everything else is
 described in the [workflow README](../README.md#start-a-watch). Unlike a
 `BackstageTemplateRun`, a `ClusterBuildWatch` only reads, so applying the

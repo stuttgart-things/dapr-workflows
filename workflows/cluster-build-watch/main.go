@@ -51,14 +51,26 @@ func ClusterBuildWatchWorkflow(ctx *workflow.WorkflowContext) (any, error) {
 		if in.GitOps != nil {
 			start += fmt.Sprintf(", after %s %s/%s applies %s", in.GitOps.Kind, in.GitOps.Namespace, in.GitOps.Name, wantRev(in.GitOps.Revision))
 		}
+		if in.Argo != nil {
+			start += fmt.Sprintf(", then the Argo CD Applications of project %s if the stack registers with Argo CD", in.Argo.Project)
+		}
 		report(ctx, &in, st, st.emit(&in, now, "started", sevInfo, start))
 	}
 
 	for range roundsPerGeneration {
 		var gitops *GitOpsObservation
 		var xr *XRObservation
+		var argo *ArgoObservation
 		var obsErr error
-		if st.Stage == stageGitOpsSync {
+		argoStage := st.Stage == stageArgoSync
+		if argoStage {
+			var o ArgoObservation
+			obsErr = ctx.CallActivity(ObserveArgo, workflow.WithActivityInput(in.Argo),
+				workflow.WithActivityRetryPolicy(observeRetry)).Await(&o)
+			if obsErr == nil {
+				argo = &o
+			}
+		} else if st.Stage == stageGitOpsSync {
 			var o GitOpsObservation
 			obsErr = ctx.CallActivity(ObserveGitOps, workflow.WithActivityInput(in.GitOps),
 				workflow.WithActivityRetryPolicy(observeRetry)).Await(&o)
@@ -75,7 +87,13 @@ func ClusterBuildWatchWorkflow(ctx *workflow.WorkflowContext) (any, error) {
 		}
 
 		now = ctx.CurrentTimeUTC()
-		for _, ev := range Advance(&in, st, gitops, xr, now) {
+		var evs []Event
+		if argoStage {
+			evs = AdvanceArgo(&in, st, argo, now)
+		} else {
+			evs = Advance(&in, st, gitops, xr, now)
+		}
+		for _, ev := range evs {
 			report(ctx, &in, st, ev)
 		}
 
@@ -175,6 +193,24 @@ func observeGitOpsKube(t GitOpsTarget) (GitOpsObservation, error) {
 	return parseArgoApplication(obj, t.Revision), nil
 }
 
+// ObserveArgo lists the Argo CD Applications of the new cluster through a
+// machinery on the Argo CD cluster, see argoFromMachinery.
+func ObserveArgo(ctx workflow.ActivityContext) (any, error) {
+	var t ArgoTarget
+	if err := ctx.GetInput(&t); err != nil {
+		return nil, fmt.Errorf("get input: %w", err)
+	}
+	if !t.fromMachinery() {
+		return nil, fmt.Errorf("argo source %q: only machinery is supported", t.Source)
+	}
+	o, err := observeArgoMachinery(activityContext(ctx), t)
+	if err != nil {
+		return nil, err
+	}
+	slog.Info("argo", "project", t.Project, "total", o.Total, "ready", o.Ready, "degraded", o.Degraded)
+	return &o, nil
+}
+
 // ObserveXR reads the XR, from the local API server (source kube) or a
 // machinery endpoint (source machinery).
 func ObserveXR(ctx workflow.ActivityContext) (any, error) {
@@ -231,6 +267,7 @@ func main() {
 	for name, fn := range map[string]workflow.Activity{
 		"ObserveGitOps": ObserveGitOps,
 		"ObserveXR":     ObserveXR,
+		"ObserveArgo":   ObserveArgo,
 		"Report":        Report,
 	} {
 		if err := r.AddActivityN(name, fn); err != nil {

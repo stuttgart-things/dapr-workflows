@@ -8,11 +8,14 @@ merge → Argo CD / Flux → Crossplane); this workflow follows it, notices when
 stage hangs, and tells people and systems about it.
 
 ```
- gitops-sync ──► xr-pending ──► vm ──► baseos ──► distribution ──► kubeconfig ──► access ──► platform ──► Ready
- (Argo CD/Flux    (XR not yet     └──────────── status.stage of the ClusterStack XR ────────────┘
-  applied the      created)
-  merge commit)
+ gitops-sync ──► xr-pending ──► vm ──► baseos ──► distribution ──► kubeconfig ──► access ──► platform ──► [argo-sync] ──► Ready
+ (Argo CD/Flux    (XR not yet     └──────────── status.stage of the ClusterStack XR ────────────┘   (the cluster's
+  applied the      created)                                                                           Argo CD Apps
+  merge commit)                                                                                       Synced+Healthy)
 ```
+
+`argo-sync` is optional and only runs for a stack that registers the cluster
+with Argo CD, see [Argo checkpoint](#argo-checkpoint).
 
 That is the standard path; the rancher and machine-pool paths are under
 [Stages](#stages). Both sides can be read from the worker's own API server or
@@ -32,8 +35,8 @@ not**. Only something that waits can say "this build has been in `baseos` for
 | `stage` | info | the XR's `status.stage` changed, with the duration of the previous stage |
 | `stuck` | warning | a stage ran past its timeout. Reported **once** per stage; the watch goes on |
 | `degraded` / `recovered` | warning / info | `Synced=False` on the XR, a failed sync, Degraded health. Reported on the transition, not on every poll |
-| `ready` | success | the XR is done, with every stage's duration |
-| `failed` | error | the overall timeout passed, or the XR was deleted mid-build |
+| `ready` | success | the XR is done (and, with `argo`, the cluster's Applications are Synced + Healthy), with every stage's duration |
+| `failed` | error | the overall timeout passed, the XR was deleted mid-build, or `argo` found no Application after its grace period |
 
 What counts as done is deliberately strict:
 
@@ -75,6 +78,7 @@ Built-in stage timeouts (minutes, override per stage with
 | `baseos` | 30 | | `ready` | 10 |
 | `distribution` | 30 | | `rancher` | 30 |
 | `join` | 30 | | `node-ip` | 15 |
+| `argo-sync` | 30 | | | |
 
 Anything else gets `target.defaultStageTimeoutMin` (30). The whole watch fails
 after `timeoutMin` (240).
@@ -251,9 +255,10 @@ ready, or the connection failed) and everything else are errors, like a 403 on
 the kube path: the watch keeps its clocks running and says why in the custom
 status.
 
-**Not supported:** Argo CD. No machinery serves `Application` yet, and the
-Argo parser needs sync, health and operation state; `gitops.kind: argocd` with
-`source: machinery` is rejected when the watch starts.
+**Not supported:** `gitops.kind: argocd` with `source: machinery`; it is
+rejected when the watch starts. (machinery now serves `Application` for the
+[Argo checkpoint](#argo-checkpoint), but the gitops Argo path is not wired to
+it.)
 
 **TLS.** The machinery gateway presents a certificate from the lab CA. Go
 honours `SSL_CERT_FILE`, and the deploy mounts trust-manager's
@@ -273,6 +278,93 @@ ConfigMap, and errors are scrubbed of it.
 One connection per observation: an activity makes one RPC every
 `pollSeconds`, so a pooled connection would save a TLS handshake per half
 minute at the price of lifecycle code for CA and token rotation.
+
+## Argo checkpoint
+
+After the XR is ready, a stack that registers its cluster with Argo CD
+(`spec.rancher.argocd.register: true`) is not done yet: Argo CD still has to
+install the platform profiles on it. With an `argo` block the watch enters
+`argo-sync` and waits until every Application generated for the cluster is
+`Synced` **and** `Healthy`.
+
+```json
+"argo": {
+  "source": "machinery",
+  "machinery": {"server": "machinery-grpc.<argo cd cluster domain>:443"}
+}
+```
+
+See [`input-argo.json`](input-argo.json) and
+[`trigger/examples/watch-argo.yaml`](trigger/examples/watch-argo.yaml).
+
+| Field | Default | |
+|---|---|---|
+| `argo.project` | `target.name` | the AppProject = the cluster name |
+| `argo.namespace` | `argocd` | namespace of the Applications |
+| `argo.includeDefaultProject` | `true` | also count `default`-project Applications named `*-<project>` |
+| `argo.always` | `false` | run even when the stack's register flag is unknown |
+| `argo.graceMin` | `15` | how long zero matching Applications counts as "not generated yet" |
+| `argo.settlePolls` | `2` | consecutive all-green polls, with an unchanged count, before done |
+| `argo.source` | — | must be `machinery` |
+| `argo.machinery.server` / `.kind` / `.plaintext` | — / `Application` / `false` | a machinery **on the Argo CD cluster** |
+
+**Read through machinery only, never the kube API.** The worker runs on a
+different cluster than Argo CD and has no credentials there, by design.
+`argo.source: kube` is rejected at start.
+
+**Which Applications.** Generated Applications carry no cluster label. The
+handle is the AppProject: the `cluster-projects` ApplicationSet creates one
+per registered cluster, named after it, and the generated Applications sit in
+it (`spec.project`; inner names are partly `<component>-<sha1(server)[:8]>`, so
+the name is no handle). A few outer ones sit in `default` instead:
+`cert-manager-install-<cluster>`, `trust-manager-install-<cluster>` and
+`proj-<cluster>`; `includeDefaultProject` picks those up by suffix. When
+another project's name is the longer suffix match (`proj-app-dev` vs project
+`dev`), the Application belongs to that one. machinery cannot filter by field,
+so the worker lists every Application (`GetResources`, kind `Application`) and
+filters on the `Project` info field. Live on platform-sthings (2026-10-02):
+`app-dev` 84 Applications (81 in the project, 3 in `default`),
+`homerun2-dev2` 50.
+
+**When it runs.** Only when `argo` is set **and** the XR's `ArgoRegister`
+(`spec.rancher.argocd.register`) is `true`. `false` finishes at XR ready as
+before, with "not registered with Argo CD, argo checkpoint skipped" in the
+ready message. An unknown flag (machinery does not map it, or the XRD has
+none) is skipped the same way and says so; `argo.always` overrides.
+
+**Done** means every matching Application `Synced` + `Healthy`, on
+`settlePolls` consecutive observations with the same count. One green poll is
+not enough: generation is staged (an app-of-apps creates its children after it
+has synced), so the first all-green poll can come before the rest exists.
+
+**Zero Applications.** Waited for up to `graceMin`; after that the watch
+**fails**. A registered cluster with nothing in its project means the wrong
+Argo CD, the wrong project, or a machinery that does not serve `Application`
+(machinery answers an empty list for a configured kind whose CRD the cluster
+does not serve, not an error). Waiting longer fixes none of these.
+
+**Degraded / stuck.** `Degraded` health, a sync operation `Failed`/`Error`,
+or an `*Error` condition (`ComparisonError`, `SyncError`, …) on any matching
+Application is reported as `degraded` (and `recovered`) on the transition.
+Warnings such as `OrphanedResourceWarning` are not errors. Past the
+`argo-sync` limit (30 min) a `stuck` event names the Applications still
+waiting, with their sync/health state.
+
+**What machinery has to provide** (stuttgart-things/flux
+`cicd/machinery/watch-config.yaml`): kind `Application` with info fields
+`Project` (`spec.project`), `Sync` (`status.sync.status`), `Health`
+(`status.health.status`), `Operation` (`status.operationState.phase`), and on
+the machinery cluster's `ClusterStack` the info field `ArgoRegister`. Missing
+`Sync`/`Health` read as not ready: such a server waits and goes stuck rather
+than passing.
+
+**Reachability.** The machinery for the checkpoint runs on the Argo CD
+cluster (flux component `machinery-argocd`, plus `machinery-grpcroute`). Its
+gateway certificate must verify against the worker's trust bundle and its
+Gateway must negotiate ALPN `h2` (see [Source machinery](#source-machinery)).
+On test5 the bundle carries the LabDA root only: LabDA `sthings-platform`
+verifies, LabUL `platform-sthings` (where `app-dev` and `homerun2-dev2`
+register today) does not.
 
 ## Run locally
 
@@ -323,7 +415,8 @@ fails with a 401.
 ## Design notes
 
 - **The checkpoint logic is a pure function**, `Advance` in
-  [`watch.go`](watch.go): observation in, events out, no Dapr, no HTTP. That is
+  [`watch.go`](watch.go) (and `AdvanceArgo` for the `argo-sync` stage):
+  observation in, events out, no Dapr, no HTTP. That is
   what the tests exercise, and it keeps the workflow function replay-safe,
   because time only enters through the orchestration clock.
 - **ContinueAsNew every 60 rounds.** A watch polls for hours, and Dapr replays
@@ -352,5 +445,8 @@ fails with a 401.
 - **Status on the CR.** The kro CR shows only the trigger Job. Projecting the
   status ConfigMap into `ClusterBuildWatch.status` (kro `externalRef`) would make
   `kubectl get clusterbuildwatch` show the stage.
-- **Checks on the built cluster** (nodes Ready, Argo CD apps on the target
-  healthy) as checkpoints after `ready`.
+- **Checks on the built cluster** (nodes Ready) as a checkpoint after
+  `ready`. The Argo CD half is the [Argo checkpoint](#argo-checkpoint); not
+  yet run as a workflow end to end (the client and filter were run read-only
+  against a local machinery on platform-sthings, `go test -tags live -run
+  TestLiveArgo`).

@@ -1,0 +1,38 @@
+---
+# Watch a ClusterStack through machinery to Ready, and then -- because the
+# stack registers the cluster with Argo CD (spec.rancher.argocd.register) --
+# until every Argo CD Application generated for it is Synced and Healthy.
+#
+# The Applications are read through a machinery on the Argo CD cluster
+# (component machinery-argocd + machinery-grpcroute in stuttgart-things/flux),
+# never through the worker's API server. Generated Applications carry no
+# cluster label; they are matched by AppProject (= the cluster name), plus the
+# default-project ones named `*-<cluster>` (cert-manager-install-<cluster> ...).
+#
+# A stack with register false, or one whose machinery does not map
+# ArgoRegister, finishes at XR ready as before; the ready message says the
+# Argo checkpoint was skipped and why.
+#
+# app-dev registers with LabUL platform-sthings. Reaching that from the worker
+# needs the LabUL CA in its trust bundle -- see the workflow README, "Argo
+# checkpoint".
+apiVersion: kro.run/v1alpha1
+kind: ClusterBuildWatch
+metadata:
+  name: app-dev-argo
+  namespace: cluster-build-watch
+spec:
+  displayName: app-dev (machinery + argo)
+  target:
+    namespace: default
+    name: app-dev
+    source: machinery
+    machinery:
+      server: machinery-grpc.machinery.4sthings.tiab.ssc.sva.de:443
+  argo:
+    # project defaults to target.name, namespace to argocd
+    source: machinery
+    machinery:
+      server: machinery-grpc.platform.sthings-vsphere.labul.sva.de:443
+      # kind defaults to Application
+  timeoutMin: 240

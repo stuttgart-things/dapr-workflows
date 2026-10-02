@@ -4,8 +4,8 @@ A [kro](https://kro.run) `ResourceGraphDefinition` that starts one
 `ClusterBuildWatchWorkflow` run per `ClusterBuildWatch` CR. It has the same
 shape and the same start-once guarantees as the
 [backstage-template-execution trigger](../../backstage-template-execution/trigger/README.md):
-a `ConfigMap` with the input and a `Job` that POSTs it to the worker's dapr
-sidecar.
+a `ConfigMap` with the input and the start script, and a `Job` that runs the
+script, which POSTs the input to the worker's dapr sidecar.
 
 ## Install
 
@@ -44,8 +44,10 @@ example is harmless.
 
 kro reconciles the CR into:
 
-- `ConfigMap/<name>-input`: the JSON input
-- `Job/<name>`: starts instance `<namespace>_<name>`, once
+- `ConfigMap/<name>-input`: the JSON input, the deadline and `start.sh`
+- `Job/<name>-<hash>` (`.status.jobName`): runs `start.sh`, which starts
+  instance `<namespace>_<name>`, once. The CR name may be at most 54
+  characters.
 
 The worker then writes `ConfigMap/cluster-build-watch.<namespace>.<name>` in
 its own namespace and keeps it current.
@@ -60,6 +62,11 @@ These rules are inherited unchanged:
 - There is no `ttlSecondsAfterFinished`, because kro would recreate the Job.
 - `notAfter` stops a CR kept in git from starting again on a rebuilt cluster
   with an empty state store.
+- An RGD update leaves existing CRs healthy and starts nothing: the script
+  lives in the ConfigMap, and what can still change in the Job (the CR's
+  `triggerImage`, the marker `trigger-v1`) is hashed into its name. Details and
+  the upgrade from the old layout:
+  [RGD updates](../../backstage-template-execution/trigger/README.md#rgd-updates).
 
 To watch the same build again, delete the CR, purge the instance, and
 re-apply:

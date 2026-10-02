@@ -54,7 +54,7 @@ Only `templateRef` and `values` are required:
 apiVersion: kro.run/v1alpha1
 kind: BackstageTemplateRun
 metadata:
-  name: create-vm-demo-1        # also the Job name — unique per run
+  name: create-vm-demo-1        # unique per run, at most 54 characters
   namespace: backstage-workflows
 spec:
   templateRef: template:default/create-terraform-vm
@@ -100,9 +100,13 @@ kubectl apply -f examples/create-vsphere-vm-labda.yaml
 
 kro reconciles it into:
 
-- `ConfigMap/<name>-input` — holds the JSON-serialized input
-- `Job/<name>` — curls the dapr sidecar and POSTs
-  `/v1.0-beta1/workflows/dapr/BackstageTemplateWorkflow/start`
+- `ConfigMap/<name>-input` — holds the JSON-serialized input (`input.json`),
+  the deadline (`not-after`) and the start script (`start.sh`)
+- `Job/<name>-<hash>` — runs `start.sh`, which asks the dapr sidecar and POSTs
+  `/v1.0-beta1/workflows/dapr/BackstageTemplateWorkflow/start`. The CR's
+  `.status.jobName` names it. `<hash>` is 8 hex characters, so the CR name may
+  be at most 54 characters; a longer one fails with `must be no more than 63
+  bytes` before anything starts.
 
 ## One CR, one run
 
@@ -114,8 +118,10 @@ happens to the CR or the Job afterwards:
 - A Job that kro recreates — deleted by hand, or its CR deleted and re-applied
   by Flux — finds the instance and exits without starting anything. Its log
   says `already exists, not starting it again`.
-- Changing the CR's `spec` does not start a new run either: the Job has already
-  run, and a Job's pod template is immutable.
+- Changing the CR's `spec` does not start a new run either: it only updates the
+  ConfigMap, and the Job has already run.
+- Updating the RGD (a new release) leaves every existing CR healthy and starts
+  nothing. See [RGD updates](#rgd-updates).
 - The Job has **no** `ttlSecondsAfterFinished` and stays Complete until the CR
   is deleted. A TTL made kro recreate the Job every five minutes, and before
   the existence check every recreation started a new run — 237 scaffolder tasks
@@ -138,6 +144,40 @@ nothing, and a value it cannot parse fails the Job. Whatever renders CRs into
 git should stamp one — the `request-vm` Backstage template in
 stuttgart-things sets seven days after the request.
 
+## RGD updates
+
+kro applies a changed RGD to every existing CR, including the Job of a CR that
+finished long ago. A Job's pod template is immutable, so before this layout a
+new trigger script in the Job's `command` made every existing CR go to `ERROR`
+(`Job.batch "<name>" is invalid: spec.template: ... field is immutable`) —
+harmless for the run, but every release turned all CRs red.
+
+The RGD therefore keeps everything a release may change out of the Job:
+
+- The script, the input and the deadline live in the ConfigMap, which kro
+  updates in place. A Job that has run is not touched; nothing runs again.
+- What is left in the pod template that can change — the CR's `triggerImage`,
+  and the marker `trigger-v1` in the RGD — is hashed into the Job's name. A
+  change gives a **new** Job and kro prunes the old one. The new Job's GET finds
+  the instance and it exits with `already exists, not starting it again`,
+  exactly like a Job deleted by hand. A new `triggerImage` *default* does not
+  reach existing CRs at all: the API server stored the default in each CR.
+- Whoever changes anything else in the Job's pod template (command, volumes,
+  securityContext) must bump `trigger-v1`, or every existing CR goes to `ERROR`
+  again.
+
+The cost of a renamed Job is one short pod per existing CR asking the sidecar.
+Like any recreated Job, it starts a run again only if the state store has
+forgotten the instance (purged, or a rebuilt Redis) and `notAfter` has not
+passed.
+
+**Upgrading from a release with the script in the Job:** nothing to do. The
+Job's name changes from `<name>` to `<name>-<hash>`, so kro creates the new Job
+(which finds the instance and exits) and prunes the old one. CRs that are in
+`ERROR` because of the immutable template recover by themselves. The pruned
+Job's pod stays behind as a Completed pod without an owner (kro deletes Jobs
+without a propagation policy); delete those by hand if they bother you.
+
 ## Watching status
 
 The CR's `.status` mirrors the trigger Job, so it only says whether the POST to
@@ -145,7 +185,8 @@ the sidecar succeeded:
 
 ```bash
 kubectl -n backstage-workflows get backstagetemplaterun
-kubectl -n backstage-workflows logs job/create-vm-demo-1   # started, or already exists
+JOB=$(kubectl -n backstage-workflows get backstagetemplaterun create-vm-demo-1 -o jsonpath='{.status.jobName}')
+kubectl -n backstage-workflows logs job/$JOB   # started, or already exists
 ```
 
 For the actual workflow progress tail the worker logs:

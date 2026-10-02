@@ -23,13 +23,20 @@ type ReportInput struct {
 	State      WatchState `json:"state"`
 }
 
-// The three sinks, each switched on by its environment, each independent: a
-// Teams outage must not stop the status ConfigMap or the webhook.
+// The four sinks, each switched on by its environment, each independent: a
+// Teams or homerun2 outage must not stop the status ConfigMap or the webhook.
 //
-//	STATUS_NAMESPACE    namespace for the status ConfigMap; defaults to the
-//	                    worker's own, read from the ServiceAccount mount
-//	TEAMS_WEBHOOK_URL   Teams incoming webhook (Workflows / Power Automate)
-//	STATUS_WEBHOOK_URL  any HTTP endpoint; receives a CloudEvent per checkpoint
+//	STATUS_NAMESPACE          namespace for the status ConfigMap; defaults to
+//	                          the worker's own, read from the ServiceAccount mount
+//	TEAMS_WEBHOOK_URL         Teams incoming webhook (Workflows / Power Automate).
+//	                          Leave empty when homerun is on: homerun2's
+//	                          notification-catcher posts the Teams card, and
+//	                          both together post every checkpoint twice
+//	STATUS_WEBHOOK_URL        any HTTP endpoint; receives a CloudEvent per checkpoint
+//	HOMERUN_PITCH_URL         homerun2 omni-pitcher, e.g. https://<host>/pitch;
+//	                          receives a homerun.Message per checkpoint
+//	HOMERUN_AUTH_TOKEN_FILE   file holding omni-pitcher's bearer token; wins over
+//	HOMERUN_AUTH_TOKEN        the token itself
 var httpClient = &http.Client{Timeout: 15 * time.Second}
 
 // Report delivers one checkpoint to every configured sink.
@@ -65,6 +72,13 @@ func Report(ctx workflow.ActivityContext) (any, error) {
 			errs = append(errs, fmt.Errorf("webhook: %w", err))
 		} else {
 			sent = append(sent, "webhook")
+		}
+	}
+	if u := os.Getenv("HOMERUN_PITCH_URL"); u != "" {
+		if err := pitchHomerun(u, in); err != nil {
+			errs = append(errs, fmt.Errorf("homerun: %w", err))
+		} else {
+			sent = append(sent, "homerun")
 		}
 	}
 	return sent, errors.Join(errs...)
@@ -233,13 +247,20 @@ func teamsMessage(in ReportInput) map[string]any {
 }
 
 func postJSON(u, contentType string, payload any) error {
+	return postJSONWithHeader(u, contentType, nil, payload)
+}
+
+func postJSONWithHeader(u, contentType string, header http.Header, payload any) error {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
 	req, err := http.NewRequest(http.MethodPost, u, bytes.NewReader(body))
 	if err != nil {
-		return err
+		return redactURL(err)
+	}
+	for k, v := range header {
+		req.Header[k] = v
 	}
 	req.Header.Set("Content-Type", contentType)
 	resp, err := httpClient.Do(req)
@@ -262,6 +283,121 @@ func redactURL(err error) error {
 	var ue *url.Error
 	if errors.As(err, &ue) {
 		return fmt.Errorf("%s <webhook>: %w", ue.Op, ue.Err)
+	}
+	return err
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SINK — homerun2 omni-pitcher
+// ─────────────────────────────────────────────────────────────────────────────
+
+// homerunMessage is homerun-library's homerun.Message (message.go), the body
+// omni-pitcher's POST /pitch decodes, with the fields this sink fills. A local
+// copy rather than an import: homerun-library pulls redigo, go-rejson and the
+// redisearch client into a worker that never talks to Redis itself, for eight
+// string fields. The JSON names must stay those of homerun.Message.
+//
+// omni-pitcher requires title and message (400 otherwise) and defaults
+// severity, author, timestamp and system when they are empty.
+type homerunMessage struct {
+	Title     string `json:"title"`
+	Message   string `json:"message"`
+	Severity  string `json:"severity,omitempty"`
+	Author    string `json:"author,omitempty"`
+	Timestamp string `json:"timestamp,omitempty"`
+	System    string `json:"system,omitempty"`
+	Tags      string `json:"tags,omitempty"`
+	URL       string `json:"url,omitempty"`
+}
+
+// homerunSystem is both system and author. notification-catcher routes on it
+// (match: {system: cluster-build-watch}); keep it stable.
+const homerunSystem = "cluster-build-watch"
+
+// homerunPitch maps one checkpoint onto a homerun.Message.
+//
+// Severities pass through unchanged: info/success/warning/error are all in
+// homerun2's ladder (debug < info < success < warning < critical/error), so
+// severity_min filters in the catchers work as they do for any other pitcher.
+// No URL: the watch input carries none, and inventing one (the Backstage
+// entity, the Argo app) would be a guess.
+func homerunPitch(in ReportInput) homerunMessage {
+	name := in.Event.Name
+	if name == "" {
+		name = in.Target.Name
+	}
+	msg := in.Event.Message
+	if msg == "" {
+		msg = in.Event.Type // omni-pitcher rejects an empty message
+	}
+	if len(in.Event.Stages) > 0 {
+		parts := make([]string, 0, len(in.Event.Stages))
+		for _, r := range stageRows(in.Event.Stages) {
+			parts = append(parts, fmt.Sprintf("%s %s", r.Stage, orDash(r.Duration)))
+		}
+		msg += "\nStages: " + strings.Join(parts, ", ")
+	}
+	tags := []string{"cluster-build", in.Event.Type}
+	if in.Event.Stage != "" {
+		tags = append(tags, in.Event.Stage)
+	}
+	tags = append(tags, in.Target.Namespace+"/"+in.Target.Name)
+	return homerunMessage{
+		Title:     fmt.Sprintf("%s: %s", name, in.Event.Type),
+		Message:   msg,
+		Severity:  in.Event.Severity,
+		Author:    homerunSystem,
+		Timestamp: in.Event.At.UTC().Format(time.RFC3339),
+		System:    homerunSystem,
+		Tags:      strings.Join(tags, ","),
+	}
+}
+
+// homerunToken is read on every report, so a rotated Secret takes effect
+// without a restart. Same rules as machineryToken: the file wins, and an
+// unreadable file is an error rather than "no auth".
+func homerunToken() (string, error) {
+	if f := os.Getenv("HOMERUN_AUTH_TOKEN_FILE"); f != "" {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			return "", fmt.Errorf("read HOMERUN_AUTH_TOKEN_FILE: %w", err)
+		}
+		return strings.TrimSpace(string(b)), nil
+	}
+	return strings.TrimSpace(os.Getenv("HOMERUN_AUTH_TOKEN")), nil
+}
+
+// pitchHomerun POSTs one checkpoint to omni-pitcher with
+// Authorization: Bearer <token>.
+//
+// A token is only ever sent over https: a plain-http URL with a token is
+// refused before anything goes on the wire. Without a token plain http is
+// allowed (an in-cluster pitcher without auth). The token is scrubbed from
+// every error, which ends up in the workflow history, the custom status and
+// the logs -- a proxy may echo request headers back in its error body.
+//
+// omni-pitcher does not deduplicate. When any sink fails, the Report activity
+// is retried as a whole, so one checkpoint can reach homerun2 (and Teams via
+// notification-catcher) more than once.
+func pitchHomerun(u string, in ReportInput) error {
+	token, err := homerunToken()
+	if err != nil {
+		return err
+	}
+	var header http.Header
+	if token != "" {
+		pu, err := url.Parse(u)
+		if err != nil {
+			return errors.New("HOMERUN_PITCH_URL is not a valid URL")
+		}
+		if !strings.EqualFold(pu.Scheme, "https") {
+			return fmt.Errorf("refusing to send the auth token over %q: HOMERUN_PITCH_URL must be https", pu.Scheme)
+		}
+		header = http.Header{"Authorization": {"Bearer " + token}}
+	}
+	err = postJSONWithHeader(u, "application/json", header, homerunPitch(in))
+	if err != nil && token != "" && strings.Contains(err.Error(), token) {
+		return errors.New(strings.ReplaceAll(err.Error(), token, "<redacted>"))
 	}
 	return err
 }

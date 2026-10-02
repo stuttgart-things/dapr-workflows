@@ -56,6 +56,21 @@ trust-manager `Bundle` targets the worker's namespace, or render with
 The token Secret is yours to provide (SOPS in flux). machinery runs without
 auth today; the worker sends the token only over TLS.
 
+## homerun2 sink
+
+| Option (`-D`) | Default | |
+|---|---|---|
+| `homerunPitchURL` | empty (off) | sets `HOMERUN_PITCH_URL`, e.g. `https://omni.platform.sthings-vsphere.labul.sva.de/pitch` |
+| `homerunTokenSecret` | empty (off) | Secret with key `token` (omni-pitcher's `AUTH_TOKEN`), mounted as `HOMERUN_AUTH_TOKEN_FILE` |
+
+Unset, the render is the same as without these options. The token Secret is
+yours to provide; the worker sends it only over https. The pitcher's
+certificate must verify against the trust bundle above: on
+cicd-machinery-test5 the LabUL CA is a source of `cluster-trust-bundle` for
+that. With homerun on, leave the `teams` key of `notify-webhooks` empty, since
+Teams gets the card from homerun2's notification-catcher. Details in the
+[workflow README](../README.md#homerun2).
+
 ## Render & apply
 
 ```bash

@@ -90,14 +90,15 @@ says which.
 ## Where the status goes
 
 Each checkpoint goes to every sink that is configured. The sinks are
-independent: if Teams is down, the ConfigMap and the webhook still get the
-checkpoint. A failed report never stops the watch.
+independent: if Teams or homerun2 is down, the ConfigMap and the webhook still
+get the checkpoint. A failed report never stops the watch.
 
 | Sink | Configured by | Content |
 |---|---|---|
 | Status ConfigMap | always (worker namespace, or `STATUS_NAMESPACE`) | `cluster-build-watch.<namespace>.<name>` with `phase`, `stage`, `message`, `lastEvent`, `stages` (JSON with durations). Label `cluster-build-watch.sthings.io/phase` |
 | Microsoft Teams | `TEAMS_WEBHOOK_URL` | Adaptive Card, colour by severity, stage durations on the final card |
 | Any HTTP endpoint | `STATUS_WEBHOOK_URL` | a CloudEvent (`io.sthings.clusterbuild.<event>`). The `id` is stable per checkpoint, so a receiver can drop the duplicate a retry sends |
+| homerun2 | `HOMERUN_PITCH_URL` (+ token) | a `homerun.Message` POSTed to omni-pitcher `/pitch`, see [homerun2](#homerun2) |
 | Dapr | always | the workflow's custom status, e.g. `[Watching] baseos: stage baseos` |
 
 ```bash
@@ -109,6 +110,50 @@ kubectl -n cluster-build-watch get cm cluster-build-watch.cluster-build-watch.u2
 
 Webhook URLs are credentials (Teams signs them in the query string). They come
 from a Secret, and a transport error never echoes them (`redactURL`).
+
+### homerun2
+
+With `HOMERUN_PITCH_URL` set, every checkpoint is pitched to homerun2's
+omni-pitcher (`POST /pitch`, `Authorization: Bearer <token>`), decided in
+dapr-workflows#49:
+
+| homerun.Message | from the checkpoint |
+|---|---|
+| `title` | `<name>: <event>`, e.g. `u26-kind1: ready` (target name when `name` is empty) |
+| `message` | the event message; on `ready`/`failed` plus `Stages: vm 19m0s, baseos 12m3s, …` |
+| `severity` | unchanged (`info`/`success`/`warning`/`error` are all homerun2 severities) |
+| `author`, `system` | `cluster-build-watch` |
+| `tags` | `cluster-build,<event>,<stage>,<target namespace>/<name>` |
+| `timestamp` | the event time, RFC 3339 |
+| `url` | not set: the watch input carries none |
+
+| Env | |
+|---|---|
+| `HOMERUN_PITCH_URL` | e.g. `https://omni.platform.sthings-vsphere.labul.sva.de/pitch`. Empty = sink off |
+| `HOMERUN_AUTH_TOKEN_FILE` | file with omni-pitcher's `AUTH_TOKEN`; read per report, wins over |
+| `HOMERUN_AUTH_TOKEN` | the token itself |
+
+- **Stream `messages`.** No routing rule in omni-pitcher, so the pitch lands
+  on homerun2's default stream. The LED and light catchers read it too: the
+  office lights react to build checkpoints.
+- **Teams goes through homerun2.** notification-catcher on platform-sthings
+  posts the Adaptive Card (`match: {system: cluster-build-watch}`). Leave
+  `TEAMS_WEBHOOK_URL` empty while the homerun sink is on, or every checkpoint
+  reaches Teams twice. The direct Teams sink stays for setups without homerun2.
+- **TLS.** The token is only ever sent over https; a plain-http URL with a
+  token is refused with an error, and the token is scrubbed from every error.
+  The pitcher's certificate is verified against `SSL_CERT_FILE`, the
+  trust-manager bundle, which therefore has to carry the pitcher's CA. On
+  cicd-machinery-test5 the LabUL CA (`infra.sthings-vsphere.labul.sva.de`) is a
+  source of `cluster-trust-bundle` for exactly this.
+- **No dedupe.** omni-pitcher does not deduplicate. When any sink fails, the
+  Report activity is retried as a whole (3 attempts), so a checkpoint can
+  reach homerun2, and thus Teams, more than once. The CloudEvent sink has a
+  stable `id` for that; homerun.Message has no such field.
+- **No homerun-library import.** The body is a local struct with
+  homerun.Message's JSON names. The library pulls the Redis clients into a
+  worker that never talks to Redis, and its HTTP client sends `X-Auth-Token`
+  where omni-pitcher expects a bearer token.
 
 ## Start a watch
 
@@ -241,6 +286,7 @@ export KUBE_API_SERVER=http://127.0.0.1:8001
 export STATUS_NAMESPACE=default          # where the status ConfigMap goes
 export TEAMS_WEBHOOK_URL='https://...'   # optional
 export STATUS_WEBHOOK_URL='https://...'  # optional
+export HOMERUN_PITCH_URL='https://.../pitch' HOMERUN_AUTH_TOKEN_FILE=...  # optional
 
 cd workflows/cluster-build-watch
 dapr run --app-id cluster-build-watch --app-protocol grpc \

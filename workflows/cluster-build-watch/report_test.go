@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -129,4 +130,202 @@ func (f fakeActivity) GetInput(v any) error {
 		return err
 	}
 	return json.Unmarshal(b, v)
+}
+
+// homerunServer is an omni-pitcher stand-in over TLS. It records the
+// Authorization header and the decoded body, and answers like /pitch does.
+func homerunServer(t *testing.T, status int, reply string) (*httptest.Server, *http.Header, *map[string]any) {
+	t.Helper()
+	var hdr http.Header
+	var body map[string]any
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/pitch" {
+			t.Errorf("got %s %s", r.Method, r.URL.Path)
+		}
+		hdr = r.Header.Clone()
+		json.NewDecoder(r.Body).Decode(&body)
+		w.WriteHeader(status)
+		io.WriteString(w, reply)
+	}))
+	t.Cleanup(srv.Close)
+	old := httpClient
+	httpClient = srv.Client()
+	t.Cleanup(func() { httpClient = old })
+	return srv, &hdr, &body
+}
+
+func TestHomerunPitchMapping(t *testing.T) {
+	in := testReport()
+	m := homerunPitch(in)
+	b, _ := json.Marshal(m)
+	var got map[string]any
+	json.Unmarshal(b, &got)
+
+	want := map[string]any{
+		"title":     "u26-kind1: ready",
+		"severity":  sevSuccess,
+		"author":    "cluster-build-watch",
+		"system":    "cluster-build-watch",
+		"timestamp": in.Event.At.UTC().Format(time.RFC3339),
+		"tags":      "cluster-build,ready," + in.Event.Stage + "," + in.Target.Namespace + "/" + in.Target.Name,
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("%s = %v, want %v", k, got[k], v)
+		}
+	}
+	if _, ok := got["url"]; ok {
+		t.Errorf("url must be left out when the input has none: %s", b)
+	}
+	msg, _ := got["message"].(string)
+	if !strings.HasPrefix(msg, in.Event.Message) || !strings.HasSuffix(msg, "\nStages: xr-pending 1m0s, vm 19m0s") {
+		t.Errorf("final event message carries the stage summary: %q", msg)
+	}
+	// Only the field names homerun.Message (homerun-library message.go) has.
+	for k := range got {
+		switch k {
+		case "title", "message", "severity", "author", "timestamp", "system", "tags", "url":
+		default:
+			t.Errorf("field %q is not part of homerun.Message", k)
+		}
+	}
+}
+
+func TestHomerunSeverityPassthrough(t *testing.T) {
+	for _, sev := range []string{sevInfo, sevSuccess, sevWarning, sevError} {
+		in := testReport()
+		in.Event.Severity = sev
+		in.Event.Stages = nil
+		if got := homerunPitch(in); got.Severity != sev {
+			t.Errorf("severity %q became %q", sev, got.Severity)
+		}
+		if strings.Contains(homerunPitch(in).Message, "Stages:") {
+			t.Errorf("no stage summary without stages")
+		}
+	}
+}
+
+func TestHomerunSinkSendsBearer(t *testing.T) {
+	srv, hdr, body := homerunServer(t, http.StatusOK, `{"status":"success"}`)
+	tokenFile := t.TempDir() + "/token"
+	os.WriteFile(tokenFile, []byte("file-token\n"), 0o600) // pragma: allowlist secret
+	t.Setenv("STATUS_NAMESPACE", "")
+	t.Setenv("KUBE_API_SERVER", "")
+	t.Setenv("TEAMS_WEBHOOK_URL", "")
+	t.Setenv("STATUS_WEBHOOK_URL", "")
+	t.Setenv("HOMERUN_PITCH_URL", srv.URL+"/pitch")
+	t.Setenv("HOMERUN_AUTH_TOKEN", "env-token")    // pragma: allowlist secret
+	t.Setenv("HOMERUN_AUTH_TOKEN_FILE", tokenFile) // wins over the env token
+
+	if statusNamespace() != "" {
+		t.Skip("running in a pod: the ServiceAccount namespace switches the ConfigMap sink on")
+	}
+
+	sent, err := Report(fakeActivity{in: testReport()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(sent.([]string), ","); got != "homerun" {
+		t.Fatalf("sent %q", got)
+	}
+	if got := hdr.Get("Authorization"); got != "Bearer file-token" {
+		t.Fatalf("Authorization = %q", got)
+	}
+	if got := hdr.Get("Content-Type"); got != "application/json" {
+		t.Fatalf("Content-Type = %q", got)
+	}
+	if (*body)["title"] != "u26-kind1: ready" || (*body)["system"] != "cluster-build-watch" {
+		t.Fatalf("body %v", *body)
+	}
+}
+
+// With a token, plain http is refused before anything goes on the wire.
+func TestHomerunRefusesPlainHTTPWithToken(t *testing.T) {
+	called := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { called = true }))
+	defer srv.Close()
+	t.Setenv("HOMERUN_AUTH_TOKEN_FILE", "")
+	t.Setenv("HOMERUN_AUTH_TOKEN", "s3cr3t-token") // pragma: allowlist secret
+
+	err := pitchHomerun(srv.URL+"/pitch", testReport())
+	if err == nil || !strings.Contains(err.Error(), "must be https") {
+		t.Fatalf("want a refusal, got %v", err)
+	}
+	if called {
+		t.Fatal("the request went out over plain http")
+	}
+	if strings.Contains(err.Error(), "s3cr3t-token") {
+		t.Fatalf("token in error: %v", err)
+	}
+
+	// Without a token plain http is fine (in-cluster pitcher without auth).
+	t.Setenv("HOMERUN_AUTH_TOKEN", "")
+	if err := pitchHomerun(srv.URL+"/pitch", testReport()); err != nil || !called {
+		t.Fatalf("plain http without a token: err=%v called=%v", err, called)
+	}
+}
+
+// A server that echoes the Authorization header back must not get the token
+// into the error, which lands in the workflow history and the logs.
+func TestHomerunTokenNeverInErrors(t *testing.T) {
+	const token = "very-secret-token" // pragma: allowlist secret
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		io.WriteString(w, "bad header: "+r.Header.Get("Authorization"))
+	}))
+	defer srv.Close()
+	old := httpClient
+	httpClient = srv.Client()
+	defer func() { httpClient = old }()
+	t.Setenv("HOMERUN_AUTH_TOKEN_FILE", "")
+	t.Setenv("HOMERUN_AUTH_TOKEN", token)
+
+	err := pitchHomerun(srv.URL+"/pitch", testReport())
+	if err == nil || !strings.Contains(err.Error(), "HTTP 401") {
+		t.Fatalf("want the 401, got %v", err)
+	}
+	if strings.Contains(err.Error(), token) {
+		t.Fatalf("token leaked: %v", err)
+	}
+
+	// Transport error: closed port.
+	err = pitchHomerun("https://127.0.0.1:1/pitch?"+token, testReport())
+	if err == nil || strings.Contains(err.Error(), token) {
+		t.Fatalf("want a redacted transport error, got %v", err)
+	}
+
+	// Unreadable token file is an error, not "no auth".
+	t.Setenv("HOMERUN_AUTH_TOKEN_FILE", t.TempDir()+"/missing")
+	if err := pitchHomerun(srv.URL+"/pitch", testReport()); err == nil || !strings.Contains(err.Error(), "HOMERUN_AUTH_TOKEN_FILE") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+// No HOMERUN_PITCH_URL, no pitch -- and a homerun failure leaves the other
+// sinks delivering.
+func TestHomerunSinkOffAndIndependent(t *testing.T) {
+	kube := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, `{}`) }))
+	defer kube.Close()
+	t.Setenv("KUBE_API_SERVER", kube.URL)
+	t.Setenv("STATUS_NAMESPACE", "watch-ns")
+	t.Setenv("TEAMS_WEBHOOK_URL", "")
+	t.Setenv("STATUS_WEBHOOK_URL", "")
+	t.Setenv("HOMERUN_PITCH_URL", "")
+	t.Setenv("HOMERUN_AUTH_TOKEN_FILE", "")
+	t.Setenv("HOMERUN_AUTH_TOKEN", "")
+
+	sent, err := Report(fakeActivity{in: testReport()})
+	if err != nil || strings.Join(sent.([]string), ",") != "configmap" {
+		t.Fatalf("sink off: sent %v err %v", sent, err)
+	}
+
+	srv, _, _ := homerunServer(t, http.StatusServiceUnavailable, `{"status":"error","message":"Failed to enqueue message"}`)
+	t.Setenv("HOMERUN_PITCH_URL", srv.URL+"/pitch")
+	sent, err = Report(fakeActivity{in: testReport()})
+	if err == nil || !strings.Contains(err.Error(), "homerun: HTTP 503") {
+		t.Fatalf("want the homerun failure reported, got %v", err)
+	}
+	if got := strings.Join(sent.([]string), ","); got != "configmap" {
+		t.Fatalf("configmap must still deliver, sent %q", got)
+	}
 }

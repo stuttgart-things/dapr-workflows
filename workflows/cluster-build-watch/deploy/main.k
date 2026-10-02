@@ -11,6 +11,7 @@ backstage-template-execution, plus the one this worker adds:
                              WRITE only ConfigMaps in its own namespace
   4. TLS trust + machinery — the cluster's trust-manager bundle as
                              SSL_CERT_FILE, an optional machinery token
+  5. homerun2 sink         — optional omni-pitcher URL + bearer token
 """
 
 import k8s.api.core.v1 as corev1
@@ -163,6 +164,43 @@ _tokenEnv = [{
 }] if _machineryTokenSecret else []
 
 # ═══════════════════════════════════════════════════════════════════════
+# 4b. homerun2 sink (optional)
+# ═══════════════════════════════════════════════════════════════════════
+# Off by default: nothing below renders unless asked for.
+#
+# -D homerunPitchURL=<url> sets HOMERUN_PITCH_URL, omni-pitcher's /pitch
+# endpoint (LabUL platform: https://omni.platform.sthings-vsphere.labul.sva.de/pitch).
+# Plain env: the URL is not a credential, the token is.
+#
+# -D homerunTokenSecret=<name> mounts key `token` of that Secret -- provided by
+# you, never rendered here -- as HOMERUN_AUTH_TOKEN_FILE, read per report like
+# the machinery token. The worker sends it only over https.
+#
+# The pitcher's certificate must verify against SSL_CERT_FILE, i.e. the
+# trust-manager bundle above must carry its CA (LabUL CA on test5).
+# With homerun on, leave the `teams` key of notify-webhooks empty: Teams gets
+# the card from homerun2's notification-catcher, and both would post twice.
+_homerunPitchURL: str = option("homerunPitchURL") or ""
+_homerunTokenSecret: str = option("homerunTokenSecret") or ""
+_homerunTokenDir = "/var/run/secrets/homerun"
+_homerunVolumes = [{
+    name = "homerun-token"
+    secret = {secretName = _homerunTokenSecret, items = [{key = "token", path = "token"}]}
+}] if _homerunTokenSecret else []
+_homerunVolumeMounts = [{
+    name = "homerun-token"
+    mountPath = _homerunTokenDir
+    readOnly = True
+}] if _homerunTokenSecret else []
+_homerunEnv = ([{
+    name = "HOMERUN_PITCH_URL"
+    value = _homerunPitchURL
+}] if _homerunPitchURL else []) + ([{
+    name = "HOMERUN_AUTH_TOKEN_FILE"
+    value = "${_homerunTokenDir}/token"
+}] if _homerunTokenSecret else [])
+
+# ═══════════════════════════════════════════════════════════════════════
 # 5. RBAC
 # ═══════════════════════════════════════════════════════════════════════
 serviceAccount = corev1.ServiceAccount {
@@ -204,9 +242,9 @@ deployment = w.buildDaprWorker(w.WorkerSpec {
     image = _image
     serviceAccountName = _name
     sidecarListenAddresses = _sidecarListenAddresses
-    env = _secretEnv + _trustEnv + _tokenEnv
-    volumes = _trustVolumes + _tokenVolumes
-    volumeMounts = _trustVolumeMounts + _tokenVolumeMounts
+    env = _secretEnv + _trustEnv + _tokenEnv + _homerunEnv
+    volumes = _trustVolumes + _tokenVolumes + _homerunVolumes
+    volumeMounts = _trustVolumeMounts + _tokenVolumeMounts + _homerunVolumeMounts
 })
 
 # ═══════════════════════════════════════════════════════════════════════

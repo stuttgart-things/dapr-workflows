@@ -259,6 +259,9 @@ func parseXR(obj map[string]any) XRObservation {
 	if b, ok := dig(obj, "status", "ready").(bool); ok {
 		o.Ready = &b
 	}
+	if b, ok := dig(obj, "spec", "rancher", "argocd", "register").(bool); ok {
+		o.ArgoRegister = &b
+	}
 	if c, ok := conditionOf(obj, "Ready"); ok {
 		o.ReadyCondition = c.Status == "True"
 		if !o.ReadyCondition && c.Message != "" {

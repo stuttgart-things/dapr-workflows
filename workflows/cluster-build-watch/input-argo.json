@@ -1,0 +1,21 @@
+{
+  "name": "app-dev",
+  "target": {
+    "namespace": "default",
+    "name": "app-dev",
+    "source": "machinery",
+    "machinery": {
+      "server": "machinery-grpc.machinery.4sthings.tiab.ssc.sva.de:443",
+      "kind": "ClusterStack"
+    }
+  },
+  "argo": {
+    "project": "app-dev",
+    "source": "machinery",
+    "machinery": {
+      "server": "machinery-grpc.platform.sthings-vsphere.labul.sva.de:443"
+    }
+  },
+  "pollSeconds": 30,
+  "timeoutMin": 240
+}

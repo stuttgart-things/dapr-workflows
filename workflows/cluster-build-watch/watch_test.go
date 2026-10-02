@@ -265,7 +265,7 @@ func TestMachineryInputJSON(t *testing.T) {
 
 // The example inputs in this directory stay valid.
 func TestExampleInputs(t *testing.T) {
-	for _, f := range []string{"input.json", "input-machinery.json"} {
+	for _, f := range []string{"input.json", "input-machinery.json", "input-argo.json"} {
 		raw, err := os.ReadFile(f)
 		if err != nil {
 			t.Fatal(err)
@@ -286,6 +286,7 @@ func TestStageTimeoutsAllPaths(t *testing.T) {
 	for stage, min := range map[string]int{
 		"rancher": 30, "node-ip": 15, "join": 30, "management-plane": 45, "ready": 10,
 		"vm": 30, "baseos": 30, "distribution": 30, "kubeconfig": 10, "access": 10, "platform": 45,
+		"argo-sync": 30,
 	} {
 		if got := in.stageTimeout(stage); got != time.Duration(min)*time.Minute {
 			t.Errorf("stage %s: %s, want %dm", stage, got, min)

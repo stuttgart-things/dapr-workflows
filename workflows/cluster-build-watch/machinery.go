@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -47,6 +48,13 @@ const (
 	infoStage       = "Stage"       // ClusterStack status.stage
 	infoStatusReady = "StatusReady" // ClusterStack status.ready, "true"/"false"
 	infoRevision    = "Revision"    // Kustomization status.lastAppliedRevision
+	// ClusterStack spec.rancher.argocd.register, "true"/"false"
+	infoArgoRegister = "ArgoRegister"
+	// Application (Argo CD), see argoFromMachinery
+	infoProject   = "Project"   // spec.project
+	infoSync      = "Sync"      // status.sync.status
+	infoHealth    = "Health"    // status.health.status
+	infoOperation = "Operation" // status.operationState.phase
 )
 
 type machineryClient struct {
@@ -144,6 +152,32 @@ func (c *machineryClient) detail(ctx context.Context, kind, namespace, name stri
 	}
 }
 
+// list fetches every object of one kind. machinery cannot filter by label or
+// field, so the caller filters. Errors as in detail; note that a kind the
+// server is configured for but whose CRD the cluster does not serve answers
+// an EMPTY list, not an error (machinery skips kinds without an informer) --
+// the Argo checkpoint's grace period is what catches that.
+func (c *machineryClient) list(ctx context.Context, kind string) ([]*rs.ResourceStatus, error) {
+	what := fmt.Sprintf("machinery %s: list %s", c.server, kind)
+	conn, err := grpc.NewClient(c.server, c.dialOptions()...)
+	if err != nil {
+		return nil, c.sanitize(fmt.Errorf("%s: %w", what, err))
+	}
+	defer conn.Close()
+
+	ctx, cancel := context.WithTimeout(ctx, machineryCallTimeout)
+	defer cancel()
+	if c.token != "" && !c.plaintext {
+		ctx = metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+c.token)
+	}
+	// Count 0 is "all" on the server.
+	res, err := rs.NewResourceServiceClient(conn).GetResources(ctx, &rs.ResourceRequest{Kind: kind})
+	if err != nil {
+		return nil, c.sanitize(fmt.Errorf("%s: %w", what, err))
+	}
+	return res.GetResources(), nil
+}
+
 // sanitize keeps the token out of an error, which ends up in the workflow
 // history, the custom status and the logs. Nothing here formats the token
 // into an error, but a server or proxy may echo request headers back.
@@ -165,6 +199,7 @@ func (c *machineryClient) sanitize(err error) error {
 //	status.stage                 <- info field Stage
 //	status.ready                 <- info field StatusReady ("true"/"false")
 //	status.lastAppliedRevision   <- info field Revision
+//	spec.rancher.argocd.register <- info field ArgoRegister ("true"/"false")
 //
 // An info field machinery does not return is left out, exactly like a field
 // the object has not written yet. Callers check the gaps that matter
@@ -196,7 +231,15 @@ func machineryObject(r *rs.ResourceStatus) (map[string]any, error) {
 	if v, ok := info[infoRevision]; ok {
 		st["lastAppliedRevision"] = v
 	}
-	return map[string]any{"status": st}, nil
+	obj := map[string]any{"status": st}
+	if v, ok := info[infoArgoRegister]; ok {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return nil, fmt.Errorf("machinery info field %s=%q is not a bool", infoArgoRegister, v)
+		}
+		obj["spec"] = map[string]any{"rancher": map[string]any{"argocd": map[string]any{"register": b}}}
+	}
+	return obj, nil
 }
 
 // xrFromMachinery judges an XR read through machinery.
@@ -268,4 +311,105 @@ func observeGitOpsMachinery(ctx context.Context, t GitOpsTarget) (GitOpsObservat
 		return GitOpsObservation{}, err
 	}
 	return gitOpsFromMachinery(r, t.Revision)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ARGO — the cluster's Applications, filtered client-side
+// ─────────────────────────────────────────────────────────────────────────────
+
+// maxPending caps the names an ArgoObservation lists, so a fresh cluster with
+// 80 Applications does not turn the status line into a wall.
+const maxPending = 8
+
+// argoFromMachinery picks the Applications of t.Project out of every
+// Application machinery serves and judges them. Pure.
+//
+// An Application counts when it is in t.Namespace and either in the project,
+// or -- with IncludeDefaultProject -- in `default` and named `*-<project>`,
+// unless a longer known project name is the better suffix match.
+//
+// Ready means sync Synced AND health Healthy. machinery's own `ready` is no
+// use here: an Application has no Ready condition, only Error/Warning ones.
+// Missing Sync/Health info fields read as "-", i.e. not ready: a server
+// without the mapping waits and goes stuck rather than passing.
+func argoFromMachinery(apps []*rs.ResourceStatus, t ArgoTarget) ArgoObservation {
+	projects := map[string]bool{}
+	for _, a := range apps {
+		if p := a.GetInfoFields()[infoProject]; p != "" && p != "default" {
+			projects[p] = true
+		}
+	}
+	belongs := func(a *rs.ResourceStatus) bool {
+		if a.GetNamespace() != t.Namespace {
+			return false
+		}
+		p := a.GetInfoFields()[infoProject]
+		if p == t.Project {
+			return true
+		}
+		if p != "default" || !t.includeDefault() || !strings.HasSuffix(a.GetName(), "-"+t.Project) {
+			return false
+		}
+		for other := range projects {
+			if len(other) > len(t.Project) && strings.HasSuffix(a.GetName(), "-"+other) {
+				return false
+			}
+		}
+		return true
+	}
+
+	var o ArgoObservation
+	var degraded []string
+	for _, a := range apps {
+		if !belongs(a) {
+			continue
+		}
+		o.Total++
+		info := a.GetInfoFields()
+		sync, health, op := info[infoSync], info[infoHealth], info[infoOperation]
+		if sync == "Synced" && health == "Healthy" {
+			o.Ready++
+		} else if len(o.Pending) < maxPending {
+			o.Pending = append(o.Pending, fmt.Sprintf("%s (%s/%s)", a.GetName(), orDash(sync), orDash(health)))
+		}
+
+		var why string
+		switch {
+		case op == "Failed" || op == "Error":
+			why = "sync " + op
+		case health == "Degraded":
+			why = "health Degraded"
+		default:
+			for _, c := range a.GetConditions() {
+				if strings.HasSuffix(c.GetType(), "Error") {
+					why = c.GetType() + ": " + c.GetMessage()
+					break
+				}
+			}
+		}
+		if why != "" {
+			degraded = append(degraded, a.GetName()+": "+why)
+		}
+	}
+	if o.Total-o.Ready > len(o.Pending) {
+		o.Pending = append(o.Pending, fmt.Sprintf("+%d more", o.Total-o.Ready-len(o.Pending)))
+	}
+	if len(degraded) > 0 {
+		sort.Strings(degraded)
+		o.Degraded = true
+		o.Message = truncate(strings.Join(degraded, "; "), 500)
+	}
+	return o
+}
+
+func observeArgoMachinery(ctx context.Context, t ArgoTarget) (ArgoObservation, error) {
+	c, err := newMachineryClient(t.Machinery)
+	if err != nil {
+		return ArgoObservation{}, err
+	}
+	apps, err := c.list(ctx, t.Machinery.Kind)
+	if err != nil {
+		return ArgoObservation{}, err
+	}
+	return argoFromMachinery(apps, t), nil
 }

@@ -43,6 +43,7 @@ spec:
       # the marshal below, and a CR without them renders exactly as before.
       target: object | required=true description="The XR to follow. Keys apiVersion (default config.stuttgart-things.com/v1alpha1), resource (plural, default clusterstacks), namespace, name, stageTimeoutMin (stage to minutes), defaultStageTimeoutMin, source (kube or machinery, default kube), machinery (server as host and port, kind default ClusterStack, plaintext for in-cluster only)"
       gitops: object | required=false description="Optional checkpoint before the XR. Keys kind (argocd or flux), namespace, name, revision, source (kube or machinery; machinery needs kind flux), machinery (server, kind default Kustomization, plaintext). revision is the merge commit; without it Synced may describe the tree before the merge."
+      argo: object | required=false description="Optional checkpoint after the XR is ready, only for a stack with spec.rancher.argocd.register true, wait until the Argo CD Applications of the new cluster are Synced and Healthy. Keys project (AppProject, default target.name), namespace (default argocd), includeDefaultProject (default true), always, graceMin (default 15), settlePolls (default 2), source (must be machinery), machinery (server of a machinery on the Argo CD cluster, kind default Application, plaintext)."
       pollSeconds: integer | default=30 description="Seconds between observations"
       timeoutMin: integer | default=240 description="Overall limit. Past it the watch fails. A stage over its own limit is only reported as stuck."
       notAfter: string | default="" description="UTC deadline, YYYY-MM-DDTHH:MM:SSZ. After it the trigger Job does not start the workflow. Empty means no deadline."
@@ -60,8 +61,11 @@ spec:
         metadata:
           name: ${schema.metadata.name}-input
         data:
+          # Four shapes, because an absent optional object must not be
+          # dereferenced: gitops and argo each with has(). A CR with neither
+          # renders exactly as before.
           input.json: |
-            ${json.marshal(has(schema.spec.gitops) ? {"name": schema.spec.displayName != "" ? schema.spec.displayName : schema.metadata.name, "target": schema.spec.target, "gitops": schema.spec.gitops, "pollSeconds": schema.spec.pollSeconds, "timeoutMin": schema.spec.timeoutMin} : {"name": schema.spec.displayName != "" ? schema.spec.displayName : schema.metadata.name, "target": schema.spec.target, "pollSeconds": schema.spec.pollSeconds, "timeoutMin": schema.spec.timeoutMin})}
+            ${json.marshal(has(schema.spec.gitops) ? (has(schema.spec.argo) ? {"name": schema.spec.displayName != "" ? schema.spec.displayName : schema.metadata.name, "target": schema.spec.target, "gitops": schema.spec.gitops, "argo": schema.spec.argo, "pollSeconds": schema.spec.pollSeconds, "timeoutMin": schema.spec.timeoutMin} : {"name": schema.spec.displayName != "" ? schema.spec.displayName : schema.metadata.name, "target": schema.spec.target, "gitops": schema.spec.gitops, "pollSeconds": schema.spec.pollSeconds, "timeoutMin": schema.spec.timeoutMin}) : (has(schema.spec.argo) ? {"name": schema.spec.displayName != "" ? schema.spec.displayName : schema.metadata.name, "target": schema.spec.target, "argo": schema.spec.argo, "pollSeconds": schema.spec.pollSeconds, "timeoutMin": schema.spec.timeoutMin} : {"name": schema.spec.displayName != "" ? schema.spec.displayName : schema.metadata.name, "target": schema.spec.target, "pollSeconds": schema.spec.pollSeconds, "timeoutMin": schema.spec.timeoutMin}))}
 
     - id: trigger
       template:

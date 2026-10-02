@@ -32,10 +32,12 @@ type fakeMachinery struct {
 	rs.UnimplementedResourceServiceServer
 	mu       sync.Mutex
 	lastAuth []string
-	objects  map[string]*rs.ResourceStatus // kind/namespace/name
-	kinds    map[string]bool               // configured kinds
-	unserved map[string]bool               // configured, CRD not served
-	echoAuth bool                          // put the auth header into the error, like a careless proxy
+	objects  map[string]*rs.ResourceStatus   // kind/namespace/name
+	kinds    map[string]bool                 // configured kinds
+	unserved map[string]bool                 // configured, CRD not served
+	echoAuth bool                            // put the auth header into the error, like a careless proxy
+	lists    map[string][]*rs.ResourceStatus // GetResources answers, per kind
+	lastKind string                          // kind of the last GetResources
 }
 
 func (f *fakeMachinery) GetResourceDetail(ctx context.Context, req *rs.ResourceDetailRequest) (*rs.ResourceStatus, error) {
@@ -56,6 +58,23 @@ func (f *fakeMachinery) GetResourceDetail(ctx context.Context, req *rs.ResourceD
 		return o, nil
 	}
 	return nil, status.Errorf(codes.NotFound, "resource %s/%s not found", req.Kind, req.Name)
+}
+
+// GetResources answers from list (per kind), like machinery: an unconfigured
+// kind is InvalidArgument, a configured but unserved one an EMPTY list.
+func (f *fakeMachinery) GetResources(ctx context.Context, req *rs.ResourceRequest) (*rs.ResourceListResponse, error) {
+	md, _ := metadata.FromIncomingContext(ctx)
+	f.mu.Lock()
+	f.lastAuth = md.Get("authorization")
+	f.lastKind = req.Kind
+	f.mu.Unlock()
+	if !f.kinds[req.Kind] {
+		return nil, status.Errorf(codes.InvalidArgument, "unsupported kind %q", req.Kind)
+	}
+	if f.unserved[req.Kind] {
+		return &rs.ResourceListResponse{}, nil
+	}
+	return &rs.ResourceListResponse{Resources: f.lists[req.Kind]}, nil
 }
 
 func (f *fakeMachinery) auth() []string {

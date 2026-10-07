@@ -14,6 +14,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -97,4 +98,50 @@ func TestLiveMachinery(t *testing.T) {
 		t.Fatalf("absent xr: %v", err)
 	}
 	show("ClusterStack default/does-not-exist-cbw-smoke", x2)
+}
+
+// TestLiveArgo lists the Applications of one project through a real machinery
+// on an Argo CD cluster:
+//
+//	LIVE_ARGO_SERVER=machinery-grpc.<argo cluster domain>:443 LIVE_ARGO_PROJECT=app-dev \
+//	  go test -tags live -run TestLiveArgo -v .
+//
+// LIVE_ARGO_PLAINTEXT=true for a local or in-cluster machinery. Optionally
+// LIVE_XR_SERVER + LIVE_CLUSTERSTACK to read ArgoRegister from the stack.
+func TestLiveArgo(t *testing.T) {
+	server := os.Getenv("LIVE_ARGO_SERVER")
+	if server == "" {
+		t.Skip("LIVE_ARGO_SERVER not set")
+	}
+	plain := os.Getenv("LIVE_ARGO_PLAINTEXT") == "true"
+	in := Input{
+		Target: XRTarget{Namespace: "default", Name: os.Getenv("LIVE_ARGO_PROJECT")},
+		Argo: &ArgoTarget{ObservationSource: ObservationSource{Source: sourceMachinery,
+			Machinery: &MachinerySource{Server: server, Plaintext: plain}}},
+	}
+	in.applyDefaults()
+	if err := in.validate(); err != nil {
+		t.Fatal(err)
+	}
+	o, err := observeArgoMachinery(context.Background(), *in.Argo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := json.MarshalIndent(o, "", "  ")
+	t.Logf("project %s: %s", in.Argo.Project, b)
+
+	if xs := os.Getenv("LIVE_XR_SERVER"); xs != "" {
+		ns, name := liveRef("LIVE_CLUSTERSTACK", "default/"+in.Argo.Project)
+		xr, err := observeXRMachinery(context.Background(), XRTarget{Namespace: ns, Name: name,
+			ObservationSource: ObservationSource{Source: sourceMachinery,
+				Machinery: &MachinerySource{Server: xs, Kind: "ClusterStack", Plaintext: os.Getenv("LIVE_XR_PLAINTEXT") == "true"}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		reg := "<nil>"
+		if xr.ArgoRegister != nil {
+			reg = strconv.FormatBool(*xr.ArgoRegister)
+		}
+		t.Logf("ClusterStack %s/%s: stage=%s ready=%v argoRegister=%s", ns, name, xr.Stage, xr.ReadyCondition, reg)
+	}
 }

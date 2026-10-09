@@ -3,7 +3,7 @@ module github.com/stuttgart-things/dapr-workflows/cluster-build-watch
 go 1.26.2
 
 require (
-	github.com/dapr/durabletask-go v0.14.1
+	github.com/dapr/durabletask-go v0.15.0
 	github.com/dapr/go-sdk v1.14.2
 	github.com/stuttgart-things/machinery v1.14.0
 	google.golang.org/grpc v1.81.1

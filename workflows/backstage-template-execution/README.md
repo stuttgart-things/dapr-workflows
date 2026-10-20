@@ -233,9 +233,32 @@ a PR description.
 |---|---|---|
 | `BACKSTAGE_URL` | worker shell | Backstage base URL. Fallback when the workflow input omits `backstageURL` — see [Lab-agnostic inputs](#lab-agnostic-inputs) |
 | `BACKSTAGE_AUTH_TOKEN` | worker shell | Bearer token for Backstage scaffolder API |
-| `GITHUB_TOKEN` | worker shell | Used by `FetchGitHubRun` and `MergePullRequest` activities |
+| `GITHUB_TOKEN` | worker shell | Used by `FetchGitHubRun` and `MergePullRequest` activities — see [GitHub token permissions](#github-token-permissions) |
 | `BACKSTAGE_INSECURE_TLS` | worker shell (optional) | `true` to skip TLS verify |
 | `DAPR_HTTP_PORT` | trigger shell | Must match `--dapr-http-port` from shell 1 (default `3500`) |
+
+### GitHub token permissions
+
+A classic PAT needs `repo` scope. A **fine-grained PAT** on the target
+repository needs:
+
+| Permission | Access | Used by |
+|---|---|---|
+| Contents | Read and write | merging the PR |
+| Pull requests | Read and write | finding and merging the PR |
+| Actions | Read | watching the workflow run, merge-gate fallback |
+
+Before it merges, `MergePullRequest` requires every check on the PR head to be
+green. It reads the commit's **check-runs** when the token can. A fine-grained
+PAT cannot be granted the `Checks` permission (GitHub offers it to GitHub Apps
+only), so check-runs answers HTTP 403. On that 403, and only then, the gate
+judges the head by its **GitHub Actions workflow runs** instead. The log line
+`pr head checks` shows which source was used (`source=check-runs` or
+`source=actions-runs`).
+
+The fallback sees only GitHub Actions. It does not see checks posted by other
+apps or commit statuses. If no workflow run exists for the head SHA, it refuses
+to merge.
 
 ## Lab-agnostic inputs
 

@@ -198,6 +198,120 @@ Input fields (see `Input` in [`watch.go`](watch.go)):
 | `pollSeconds` | 30 | |
 | `timeoutMin` | 240 | |
 
+## Discovery
+
+With discovery on, the worker finds the builds itself: nobody has to write a
+`ClusterBuildWatch` for an order (stuttgart-things/stuttgart-things#3831).
+Every `CLUSTER_BUILD_WATCH_DISCOVERY_INTERVAL` it lists the `ClusterStack`s on
+machinery, over the same ResourceService and token as a `source: machinery`
+watch (`GetResources`), and makes sure these watches exist
+([`discovery.go`](discovery.go)):
+
+| ClusterStack | Watch | Instance ID |
+|---|---|---|
+| not Ready, not deleting, created after the worker started **or** within the look-back | build watch: `ClusterBuildWatchWorkflow`, the same workflow a `ClusterBuildWatch` starts, through machinery, with the gitops phase on `machinery-xrs` at `revision: ""` (any revision, dapr-workflows#59) | `build-<uid>` |
+| `deletionTimestamp` set (any age, Ready or not) | teardown watch: `ClusterTeardownWatchWorkflow`, see [below](#teardown-watch) | `teardown-<uid>` |
+| Ready, or older than the look-back at worker start | none | |
+| annotation `cluster-build-watch.stuttgart-things.com/watch: "false"`, or matched by `CLUSTER_BUILD_WATCH_DISCOVERY_EXCLUDE` | none | |
+
+**Idempotent by instance ID.** The ID is the whole bookkeeping: before
+starting, the worker asks Dapr whether `build-<uid>` exists, and starts only
+on a clean not-found, with `EnforceUniqueInstanceId` so Dapr refuses to restart
+a finished one. An "already exists" on the start counts as known. A worker
+restart during a build therefore finds the running instance and starts
+nothing; a cluster rebuilt under the same name has a new uid and gets a new
+watch. When Dapr cannot answer, nothing is started and the next pass tries
+again -- a duplicate watch would send every card twice. Confirmed IDs are
+kept in memory, so the steady state is one list call per interval.
+
+**The explicit `ClusterBuildWatch` stays** for re-watching by hand and for
+targets that are not ClusterStacks. Its instance IDs (`<namespace>_<name>`)
+never collide with discovery's, which also means a stack with both gets two
+watches: opt the stack out of discovery when you watch it explicitly.
+
+| Variable | Default | |
+|---|---|---|
+| `CLUSTER_BUILD_WATCH_DISCOVERY` | off | `on` / `true` / `1` switches discovery on. Off, the worker behaves exactly as before |
+| `CLUSTER_BUILD_WATCH_DISCOVERY_SERVER` | — | machinery `host:port`, required when on |
+| `CLUSTER_BUILD_WATCH_DISCOVERY_PLAINTEXT` | `false` | no TLS (in-cluster Service only; no token is sent then) |
+| `CLUSTER_BUILD_WATCH_DISCOVERY_KIND` | `ClusterStack` | kind name as configured on that machinery |
+| `CLUSTER_BUILD_WATCH_DISCOVERY_INTERVAL` | `60s` | list interval, at least `10s` |
+| `CLUSTER_BUILD_WATCH_DISCOVERY_LOOKBACK` | `30m` | a stack created before the worker started is still watched when it is younger than this |
+| `CLUSTER_BUILD_WATCH_DISCOVERY_GITOPS` | `flux-system/machinery-xrs` | Flux Kustomization of the gitops phase; set but empty: no gitops phase |
+| `CLUSTER_BUILD_WATCH_DISCOVERY_ARGO_SERVER` | — | machinery on the Argo CD cluster; set, the build watch gets the [Argo checkpoint](#argo-checkpoint) |
+| `CLUSTER_BUILD_WATCH_DISCOVERY_TIMEOUT_MIN` | `240` | `timeoutMin` of a discovered build watch |
+| `CLUSTER_BUILD_WATCH_TEARDOWN_TIMEOUT_MIN` | `60` | `timeoutMin` of a teardown watch |
+| `CLUSTER_BUILD_WATCH_DISCOVERY_EXCLUDE` | — | comma-separated `<namespace>/<name>` globs (`default/test-*`) never watched |
+
+A discovery switched on with a broken value stops the worker at start
+(`discovery: ...` in the log) rather than running without it.
+
+**What machinery has to provide.** `GetResources` returns name, namespace,
+conditions and `creationTimestamp` natively. The rest comes from info fields
+on the `ClusterStack` kind of the machinery server:
+
+| Info field | Path | Needed for |
+|---|---|---|
+| `UID` | `metadata.uid` | **required**: the instance ID. A stack without it is skipped, and the log says so |
+| `StatusReady`, `Stage` | `status.ready`, `status.stage` | Ready, as for every machinery watch (mapped today) |
+| `DeletionTimestamp` | `metadata.deletionTimestamp` | teardown detection. Without it, Crossplane's `Ready` condition with reason `Deleting` is the signal |
+| `ResourceRefs` | `spec.crossplane.resourceRefs` | teardown progress (machinery renders the list as `ns/name, ...`). Without it the teardown watch sends start and end only |
+| `Watch` | the opt-out annotation | see the gap below |
+
+**Gap: the opt-out annotation.** machinery's info field paths are split on
+every `.` (`getNestedField`, machinery v1.14.1), so
+`metadata.annotations.cluster-build-watch.stuttgart-things.com/watch` cannot
+be addressed, and a whole map (`metadata.annotations`) renders as nothing. The
+worker honours an info field `Watch` = `"false"` as soon as a machinery can
+deliver it (an escaped-path or annotation mapping in machinery); until then
+`CLUSTER_BUILD_WATCH_DISCOVERY_EXCLUDE` is the working opt-out.
+
+**Not covered.** A stack deleted entirely between two passes (no finalizer
+holding it) is never seen deleting and gets no teardown watch. A stack
+created and Ready between two passes gets no build watch.
+
+### Teardown watch
+
+`ClusterTeardownWatchWorkflow` ([`teardown.go`](teardown.go)) follows a
+deleting XR through machinery until it is gone. Like the build watch it only
+watches, and it reports through the same sinks, under the status ConfigMap
+`cluster-build-watch.teardown-<uid>`:
+
+| Event | Severity | When |
+|---|---|---|
+| `started` | info | first observation, with the child resources still there (`ResourceRefs`) |
+| `progress` | info | the number of child resources changed: which are gone, which are left |
+| `deleted` | success | the XR is gone (a single card when it was gone at the first look) |
+| `failed` | error | still there after `CLUSTER_BUILD_WATCH_TEARDOWN_TIMEOUT_MIN`, with what is left |
+
+A build watch running when the stack is deleted ends as before, with `failed:
+XR was deleted while the build was being watched`.
+
+### Switching it on (flux)
+
+Nothing in the released kustomize base sets these variables, so a deploy
+changes nothing until the flux side does. On `cicd-machinery-test5`, in
+stuttgart-things/flux (not changed by this PR):
+
+1. **machinery server** (`cicd/machinery/watch-config.yaml`, ClusterStack
+   `infoFields`): add `{ "label": "UID", "path": "metadata.uid" }`, and for
+   teardowns `{ "label": "DeletionTimestamp", "path":
+   "metadata.deletionTimestamp" }` and `{ "label": "ResourceRefs", "path":
+   "spec.crossplane.resourceRefs" }`. Without `UID` discovery runs and starts
+   nothing.
+2. **worker** (`apps/dapr/components/cluster-build-watch`): an opt-in
+   component in the style of `cluster-build-watch-homerun` that patches the
+   worker Deployment's env with `CLUSTER_BUILD_WATCH_DISCOVERY=on` and
+   `CLUSTER_BUILD_WATCH_DISCOVERY_SERVER=machinery-grpc.machinery.4sthings.tiab.ssc.sva.de:443`
+   (plus any of the optional variables), selected from
+   `ks-cluster-build-watch.yaml` by a cluster variable such as
+   `CLUSTER_BUILD_WATCH_DISCOVERY: on|off`.
+3. **image**: `CLUSTER_BUILD_WATCH_VERSION` on a release that contains this
+   change.
+
+The worker already has the machinery token and the trust bundle for its
+`source: machinery` watches; discovery uses the same ones.
+
 ## Source machinery
 
 By default (`source: kube`) the worker GETs the objects from the API server it
@@ -441,7 +555,13 @@ fails with a 401.
 - **Chaining from `backstage-template-execution`.** After its merge step, that
   workflow knows the merge SHA. It could start this one, with
   `gitops.revision` filled in, instead of a human writing the CR. Cross-app
-  start works with `WithDetachedWorkflowAppID`.
+  start works with `WithDetachedWorkflowAppID`. [Discovery](#discovery) covers
+  every ClusterStack order without it, at the price of `revision: ""`.
+- **Discovery and teardown not run under Dapr yet.** Tested against a fake
+  ResourceService and a fake workflow client; whether Dapr 1.17 answers a
+  missing instance with `exists=false` or an error, and an existing one on
+  `EnforceUniqueInstanceId` with `AlreadyExists`, is handled both ways but
+  unverified live.
 - **Status on the CR.** The kro CR shows only the trigger Job. Projecting the
   status ConfigMap into `ClusterBuildWatch.status` (kro `externalRef`) would make
   `kubectl get clusterbuildwatch` show the stage.

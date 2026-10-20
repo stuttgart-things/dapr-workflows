@@ -261,19 +261,33 @@ func main() {
 	})))
 
 	r := workflow.NewRegistry()
-	if err := r.AddWorkflowN("ClusterBuildWatchWorkflow", ClusterBuildWatchWorkflow); err != nil {
-		log.Fatalf("register workflow: %v", err)
+	for name, fn := range map[string]workflow.Workflow{
+		buildWorkflowName:    ClusterBuildWatchWorkflow,
+		teardownWorkflowName: ClusterTeardownWatchWorkflow,
+	} {
+		if err := r.AddWorkflowN(name, fn); err != nil {
+			log.Fatalf("register workflow %s: %v", name, err)
+		}
 	}
 	for name, fn := range map[string]workflow.Activity{
-		"ObserveGitOps": ObserveGitOps,
-		"ObserveXR":     ObserveXR,
-		"ObserveArgo":   ObserveArgo,
-		"Report":        Report,
+		"ObserveGitOps":   ObserveGitOps,
+		"ObserveXR":       ObserveXR,
+		"ObserveArgo":     ObserveArgo,
+		"ObserveTeardown": ObserveTeardown,
+		"Report":          Report,
 	} {
 		if err := r.AddActivityN(name, fn); err != nil {
 			log.Fatalf("register %s: %v", name, err)
 		}
 	}
+
+	// Read before anything starts: a discovery switched on with a broken
+	// configuration fails the rollout instead of running without it.
+	discovery, err := discoveryConfigFromEnv()
+	if err != nil {
+		log.Fatalf("discovery: %v", err)
+	}
+	workerStart := time.Now()
 
 	wfClient, err := dapr.NewWorkflowClient()
 	if err != nil {
@@ -291,6 +305,12 @@ func main() {
 
 	time.Sleep(2 * time.Second)
 	slog.Info("worker ready — use run.sh to start a watch")
+
+	if discovery.Enabled {
+		go newDiscoverer(discovery, wfClient, workerStart).run(ctx)
+	} else {
+		slog.Info("discovery off (CLUSTER_BUILD_WATCH_DISCOVERY)")
+	}
 
 	sigCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()

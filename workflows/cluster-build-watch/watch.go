@@ -406,6 +406,9 @@ type WatchState struct {
 	// the Application count of the last one. See ArgoTarget.SettlePolls.
 	ArgoGreen int `json:"argoGreen,omitempty"`
 	ArgoTotal int `json:"argoTotal,omitempty"`
+	// Children are the child resources a teardown watch saw last, see
+	// AdvanceTeardown. Unused by the build watch.
+	Children []string `json:"children,omitempty"`
 	// Seq numbers the events so receivers can drop the duplicate an activity
 	// retry may deliver.
 	Seq int `json:"seq"`

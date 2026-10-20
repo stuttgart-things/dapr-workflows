@@ -775,6 +775,7 @@ func notGreen(name, status, conclusion string) string {
 // not surface at all.
 func unfinishedActionsRuns(owner, repo, sha, token string) ([]string, error) {
 	type actionsRun struct {
+		ID           int64  `json:"id"`
 		Name         string `json:"name"`
 		Path         string `json:"path"`
 		WorkflowID   int64  `json:"workflow_id"`
@@ -863,17 +864,59 @@ func unfinishedActionsRuns(owner, repo, sha, token string) ([]string, error) {
 	// Same caveat as keying on names: one workflow fired by two events on the
 	// same SHA (push and pull_request) shares one entry, and the newer hides
 	// the older.
+	//
+	// A CANCELLED DUPLICATE IS NOT A VERDICT -- AND TIES MUST NOT BE ARBITRARY.
+	//
+	// Witnessed on stuttgart-things#3889 (2026-10-20, head 5cbeb476f): on PR
+	// open GitHub started several workflows TWICE, every copy with the same
+	// run_started_at (19:52:56Z) and run_attempt 1. Each workflow's
+	// concurrency group then cancelled one copy; the other went success or
+	// skipped. "PR Packer Build with Dagger" came back cancelled, cancelled,
+	// skipped, skipped. With start time and attempt equal, the pick above was
+	// whatever the API listed first -- it landed on a cancelled copy, and the
+	// gate refused a head whose every workflow was in fact fine.
+	//
+	// Two rules close that:
+	//
+	//   - A cancelled run is dropped when the SAME workflow has at least one
+	//     run on this SHA that is not cancelled: it was superseded, and the
+	//     survivor carries the verdict. This also holds when the survivor is
+	//     older -- it judged the same commit. Only when EVERY run of a workflow
+	//     is cancelled does the cancellation stand, and that is reported as
+	//     `name (cancelled)` and refused, as before: nobody judged that head.
+	//   - Among what remains, run id is the final tiebreak. Ids are assigned
+	//     monotonically, so equal timestamps and attempts resolve to the
+	//     later-created run, the same way on every call.
+	isCancelled := func(r actionsRun) bool {
+		return r.Status == "completed" && r.Conclusion == "cancelled"
+	}
+	hasLive := map[int64]bool{}
+	for _, r := range all {
+		if !isCancelled(r) {
+			hasLive[r.WorkflowID] = true
+		}
+	}
 	started := func(r actionsRun) string {
 		if r.RunStartedAt != "" {
 			return r.RunStartedAt
 		}
 		return r.CreatedAt
 	}
+	newer := func(a, b actionsRun) bool {
+		if started(a) != started(b) {
+			return started(a) > started(b)
+		}
+		if a.RunAttempt != b.RunAttempt {
+			return a.RunAttempt > b.RunAttempt
+		}
+		return a.ID > b.ID
+	}
 	newest := map[int64]actionsRun{}
 	for _, r := range all {
-		prev, ok := newest[r.WorkflowID]
-		if !ok || started(r) > started(prev) ||
-			(started(r) == started(prev) && r.RunAttempt > prev.RunAttempt) {
+		if isCancelled(r) && hasLive[r.WorkflowID] {
+			continue // superseded by a live run of the same workflow
+		}
+		if prev, ok := newest[r.WorkflowID]; !ok || newer(r, prev) {
 			newest[r.WorkflowID] = r
 		}
 	}

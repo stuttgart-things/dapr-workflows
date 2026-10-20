@@ -343,3 +343,104 @@ func TestUnfinishedChecksFallback(t *testing.T) {
 		})
 	}
 }
+
+// withID sets the run id -- the deterministic tiebreak when start time and
+// attempt are equal.
+func withID(r map[string]interface{}, id int64) map[string]interface{} {
+	r["id"] = id
+	return r
+}
+
+// Shapes from stuttgart-things#3889 (head 5cbeb476f): GitHub starts some
+// workflows twice on PR open, all copies with the same run_started_at and
+// run_attempt 1, and the concurrency group cancels one copy of each. The
+// cancelled duplicates must not decide the verdict, and ties must resolve the
+// same way regardless of the order the API lists them in.
+func TestUnfinishedChecksFallbackCancelledDuplicates(t *testing.T) {
+	const ts = "2026-10-20T19:52:56Z"
+	pr3889 := func() []map[string]interface{} {
+		return []map[string]interface{}{
+			// "PR Ansible Provisioning with Dagger": skipped, skipped, cancelled, cancelled
+			withID(wfRun(10, "PR Ansible Provisioning with Dagger", "completed", "skipped", 1, ts), 1001),
+			withID(wfRun(10, "PR Ansible Provisioning with Dagger", "completed", "skipped", 1, ts), 1002),
+			withID(wfRun(10, "PR Ansible Provisioning with Dagger", "completed", "cancelled", 1, ts), 1003),
+			withID(wfRun(10, "PR Ansible Provisioning with Dagger", "completed", "cancelled", 1, ts), 1004),
+			// "PR Packer Build with Dagger": cancelled, cancelled, skipped, skipped
+			withID(wfRun(11, "PR Packer Build with Dagger", "completed", "cancelled", 1, ts), 1005),
+			withID(wfRun(11, "PR Packer Build with Dagger", "completed", "cancelled", 1, ts), 1006),
+			withID(wfRun(11, "PR Packer Build with Dagger", "completed", "skipped", 1, ts), 1007),
+			withID(wfRun(11, "PR Packer Build with Dagger", "completed", "skipped", 1, ts), 1008),
+			// a duplicated workflow whose survivor succeeded, cancelled copy has the higher id
+			withID(wfRun(12, "pr-vm-deploy", "completed", "success", 1, ts), 1009),
+			withID(wfRun(12, "pr-vm-deploy", "completed", "cancelled", 1, ts), 1010),
+			withID(wfRun(13, "validate-cluster-components", "completed", "success", 1, ts), 1011),
+		}
+	}
+	reversed := func(in []map[string]interface{}) []map[string]interface{} {
+		out := make([]map[string]interface{}, 0, len(in))
+		for i := len(in) - 1; i >= 0; i-- {
+			out = append(out, in[i])
+		}
+		return out
+	}
+
+	tests := []struct {
+		name    string
+		runs    []map[string]interface{}
+		wantBad []string
+	}{
+		{name: "PR #3889 shape is green", runs: pr3889()},
+		{name: "PR #3889 shape is green in reverse API order", runs: reversed(pr3889())},
+		{
+			name: "every run of a workflow cancelled is refused",
+			runs: []map[string]interface{}{
+				withID(wfRun(12, "pr-vm-deploy", "completed", "success", 1, ts), 1),
+				withID(wfRun(14, "nightly", "completed", "cancelled", 1, ts), 2),
+				withID(wfRun(14, "nightly", "completed", "cancelled", 1, ts), 3),
+			},
+			wantBad: []string{"nightly (cancelled)"},
+		},
+		{
+			name: "equal timestamps resolve to the higher id",
+			runs: []map[string]interface{}{
+				withID(wfRun(15, "lint", "completed", "success", 1, ts), 2001),
+				withID(wfRun(15, "lint", "completed", "failure", 1, ts), 2002),
+			},
+			wantBad: []string{"lint (failure)"},
+		},
+		{
+			name: "equal timestamps resolve to the higher id in reverse order",
+			runs: []map[string]interface{}{
+				withID(wfRun(15, "lint", "completed", "failure", 1, ts), 2002),
+				withID(wfRun(15, "lint", "completed", "success", 1, ts), 2001),
+			},
+			wantBad: []string{"lint (failure)"},
+		},
+		{
+			name: "a live in-progress copy outranks its cancelled duplicate",
+			runs: []map[string]interface{}{
+				withID(wfRun(16, "build", "in_progress", "", 1, ts), 3001),
+				withID(wfRun(16, "build", "completed", "cancelled", 1, ts), 3002),
+			},
+			wantBad: []string{"build (in_progress)"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			hits := 0
+			srv := fallbackServer(t, 403, nil, tc.runs, 0, &hits)
+			defer srv.Close()
+			githubAPI = srv.URL
+			defer func() { githubAPI = "https://api.github.com" }()
+
+			bad, err := unfinishedChecks("o", "r", "sha", "tok")
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if fmt.Sprint(bad) != fmt.Sprint(tc.wantBad) {
+				t.Fatalf("notGreen: want %v, got %v", tc.wantBad, bad)
+			}
+		})
+	}
+}

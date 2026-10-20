@@ -28,7 +28,7 @@ Inputs are passed as JSON; the worker reads `GITHUB_TOKEN` from its environment 
 ```bash
 cd backstage-template-execution
 export DAPR_SERVICE_TOKEN=...   # Backstage scaffolder token
-export GITHUB_TOKEN=...         # PAT with repo scope (actions:read + pull_requests:write)
+export GITHUB_TOKEN=...         # classic PAT: repo scope; fine-grained: Contents RW, Pull requests RW, Actions R
 dapr run --app-id backstage-tpl --dapr-http-port 3500 -- go run .
 
 # in another terminal

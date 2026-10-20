@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -588,13 +589,57 @@ func pickRun(runs []ghWorkflowRun, notBefore string) *ghWorkflowRun {
 // `neutral` and `skipped` are green on purpose. A skipped job is the normal
 // state of a conditional workflow -- pr-vm-deploy.yaml alone contributes
 // several -- and treating them as failures would block every merge.
+//
+// TWO SOURCES, ONE VERDICT FORMAT.
+//
+// The check-runs endpoint needs the `Checks` permission, and GitHub offers
+// that to GitHub Apps only: a fine-grained personal access token cannot be
+// granted it and gets HTTP 403, whatever else it may do. Verified on
+// stuttgart-things/stuttgart-things with a fine-grained PAT (Actions: Read,
+// Contents: Read): 200 on /actions/runs, 403 on /commits/main/check-runs.
+// So on 403 -- and ONLY on 403 -- the SHA is judged by its GitHub Actions
+// workflow runs instead (needs Actions: Read). Any other failure stays an
+// error: a 404, a 5xx or a timeout says nothing about the token's scope, and
+// silently switching sources there would hide a real outage behind a
+// narrower view. A token that can read check-runs keeps exactly the old path.
+//
 // githubAPI is a var, not a const, so the merge gate can be tested against an
 // httptest server. It is the one call site where that matters: unfinishedChecks
 // decides whether a PR merges, and its pagination cannot be proven against the
 // real API without a commit carrying 100+ check runs.
 var githubAPI = "https://api.github.com"
 
+// errChecksForbidden marks the one check-runs failure that switches sources.
+var errChecksForbidden = errors.New("check-runs: HTTP 403")
+
+// ghGet is the GET every page of the merge gate goes through.
+func ghGet(url, token string) (int, []byte, error) {
+	req, _ := http.NewRequest(http.MethodGet, url, nil)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return 0, nil, err
+	}
+	raw, _ := io.ReadAll(resp.Body)
+	resp.Body.Close() // called in loops: close per call, not via defer
+	return resp.StatusCode, raw, nil
+}
+
+// gateMaxPages bounds both sources: 2000 entries, a bound, not an expectation.
+const gateMaxPages = 20
+
 func unfinishedChecks(owner, repo, sha, token string) ([]string, error) {
+	bad, err := unfinishedCheckRuns(owner, repo, sha, token)
+	if errors.Is(err, errChecksForbidden) {
+		return unfinishedActionsRuns(owner, repo, sha, token)
+	}
+	return bad, err
+}
+
+func unfinishedCheckRuns(owner, repo, sha, token string) ([]string, error) {
 	type checkRun struct {
 		Name       string `json:"name"`
 		Status     string `json:"status"`
@@ -612,31 +657,27 @@ func unfinishedChecks(owner, repo, sha, token string) ([]string, error) {
 	// runs from two pushes. Superseded entries count, and every re-run adds a
 	// whole suite -- so the number grows with exactly the activity that makes
 	// a careful gate matter most.
-	const maxPages = 20 // 2000 check runs: a bound, not an expectation
 	var all []checkRun
 	total := -1
 	for page := 1; ; page++ {
-		if page > maxPages {
+		if page > gateMaxPages {
 			return nil, fmt.Errorf("check runs for %s: exceeded %d pages (%d of %d collected)",
-				sha, maxPages, len(all), total)
+				sha, gateMaxPages, len(all), total)
 		}
-		url := fmt.Sprintf(
+		code, raw, err := ghGet(fmt.Sprintf(
 			githubAPI+"/repos/%s/%s/commits/%s/check-runs?per_page=100&page=%d",
 			owner, repo, sha, page,
-		)
-		req, _ := http.NewRequest(http.MethodGet, url, nil)
-		req.Header.Set("Accept", "application/vnd.github+json")
-		req.Header.Set("Authorization", "Bearer "+token)
-		req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-
-		resp, err := http.DefaultClient.Do(req)
+		), token)
 		if err != nil {
 			return nil, err
 		}
-		raw, _ := io.ReadAll(resp.Body)
-		resp.Body.Close() // in a loop: close per iteration, not via defer
-		if resp.StatusCode != 200 {
-			return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, raw)
+		if code == http.StatusForbidden {
+			// Wrapped, not replaced: should the fallback ever be removed, the
+			// body still says which permission GitHub wanted.
+			return nil, fmt.Errorf("%w: %s", errChecksForbidden, raw)
+		}
+		if code != 200 {
+			return nil, fmt.Errorf("HTTP %d: %s", code, raw)
 		}
 
 		var parsed struct {
@@ -651,7 +692,7 @@ func unfinishedChecks(owner, repo, sha, token string) ([]string, error) {
 
 		// A short page is the last one. Do NOT loop on len(all) < total: a
 		// check created while we page raises total_count and would spin us to
-		// maxPages against an endpoint whose last page is already empty.
+		// gateMaxPages against an endpoint whose last page is already empty.
 		if len(parsed.CheckRuns) < 100 {
 			break
 		}
@@ -682,6 +723,10 @@ func unfinishedChecks(owner, repo, sha, token string) ([]string, error) {
 	// share one entry, so the newer green one hides the older red one. Both
 	// jobs called `Config` in that measurement -- harmless there (all
 	// skipped/success), worth knowing before naming a job something generic.
+	//
+	// Zero check runs is left a pass here, as it always was: this path is
+	// unchanged for tokens that can read it. The actions-runs fallback below
+	// refuses on zero -- see there for why the two differ.
 	newest := map[string]checkRun{}
 	for _, c := range all {
 		if prev, ok := newest[c.Name]; !ok || c.StartedAt > prev.StartedAt {
@@ -691,18 +736,160 @@ func unfinishedChecks(owner, repo, sha, token string) ([]string, error) {
 
 	var bad []string
 	for _, c := range newest {
-		if c.Status != "completed" {
-			bad = append(bad, fmt.Sprintf("%s (%s)", c.Name, c.Status))
-			continue
-		}
-		switch c.Conclusion {
-		case "success", "neutral", "skipped":
-		default:
-			bad = append(bad, fmt.Sprintf("%s (%s)", c.Name, c.Conclusion))
+		if b := notGreen(c.Name, c.Status, c.Conclusion); b != "" {
+			bad = append(bad, b)
 		}
 	}
 	sort.Strings(bad) // map order is random; a stable message is greppable
-	slog.Info("pr head checks",
+	slog.Info("pr head checks", "source", "check-runs",
+		"sha", sha, "total", total, "distinct", len(newest), "notGreen", len(bad))
+	return bad, nil
+}
+
+// notGreen renders one entry of the verdict, or "" when it is green. Both
+// sources share it, so the caller's "refusing to merge" message reads the
+// same whichever source judged.
+func notGreen(name, status, conclusion string) string {
+	if status != "completed" {
+		return fmt.Sprintf("%s (%s)", name, status)
+	}
+	switch conclusion {
+	case "success", "neutral", "skipped":
+		return ""
+	}
+	return fmt.Sprintf("%s (%s)", name, conclusion)
+}
+
+// unfinishedActionsRuns is the fallback for tokens that may not read
+// check-runs: it judges `sha` by the GitHub Actions workflow runs on it.
+//
+// CAVEAT: this sees GitHub Actions only. Checks posted by other apps
+// (external CI, security scanners, ...) and plain commit statuses are
+// invisible here, so a red check from one of those does NOT block the merge
+// on this path. In stuttgart-things today every gate is an Actions workflow;
+// the day that stops being true, this path needs a token that can read
+// check-runs (i.e. a GitHub App), not a wider fallback.
+//
+// It also judges per WORKFLOW, not per job: a workflow run's conclusion is
+// already the roll-up of its jobs, and a skipped job inside a green run does
+// not surface at all.
+func unfinishedActionsRuns(owner, repo, sha, token string) ([]string, error) {
+	type actionsRun struct {
+		Name         string `json:"name"`
+		Path         string `json:"path"`
+		WorkflowID   int64  `json:"workflow_id"`
+		Status       string `json:"status"`
+		Conclusion   string `json:"conclusion"`
+		RunAttempt   int    `json:"run_attempt"`
+		CreatedAt    string `json:"created_at"`
+		RunStartedAt string `json:"run_started_at"`
+	}
+
+	// Same pagination contract as the check-runs path above: bounded pages,
+	// a short page ends the loop, and collecting fewer than total_count is a
+	// refusal, never a verdict. (This endpoint additionally caps a head_sha
+	// search at 1000 results; past that total_count stays the real number,
+	// so the backstop refuses rather than judging the first 1000.)
+	var all []actionsRun
+	total := -1
+	for page := 1; ; page++ {
+		if page > gateMaxPages {
+			return nil, fmt.Errorf("actions runs for %s: exceeded %d pages (%d of %d collected)",
+				sha, gateMaxPages, len(all), total)
+		}
+		code, raw, err := ghGet(fmt.Sprintf(
+			githubAPI+"/repos/%s/%s/actions/runs?head_sha=%s&per_page=100&page=%d",
+			owner, repo, sha, page,
+		), token)
+		if err != nil {
+			return nil, err
+		}
+		if code != 200 {
+			// Say which source failed: the caller only asked for "checks", and
+			// a 403 here after a 403 on check-runs means Actions: Read is missing.
+			return nil, fmt.Errorf("check-runs forbidden (HTTP 403), actions runs fallback HTTP %d: %s",
+				code, raw)
+		}
+
+		var parsed struct {
+			TotalCount   int          `json:"total_count"`
+			WorkflowRuns []actionsRun `json:"workflow_runs"`
+		}
+		if err := json.Unmarshal(raw, &parsed); err != nil {
+			return nil, err
+		}
+		all = append(all, parsed.WorkflowRuns...)
+		total = parsed.TotalCount
+
+		if len(parsed.WorkflowRuns) < 100 {
+			break
+		}
+	}
+	if len(all) < total {
+		return nil, fmt.Errorf("actions runs for %s: collected %d of %d -- refusing to judge a partial list",
+			sha, len(all), total)
+	}
+
+	// ZERO RUNS IS NOT GREEN.
+	//
+	// The check-runs path lets an empty list pass (unchanged legacy). Here the
+	// same answer is far more likely to be wrong: the gate runs on a PR head
+	// whose pr-vm-deploy run the workflow has just watched go green, so the
+	// runs exist -- an empty list means GitHub has not created them for this
+	// SHA yet (a push landed after the watch), or the token sees a different
+	// repository than intended. Neither is evidence of green. Refusing costs a
+	// human merge; passing would merge a head nobody has judged.
+	if len(all) == 0 {
+		return nil, fmt.Errorf("actions runs for %s: none found -- refusing to treat an unjudged head as green "+
+			"(check-runs were forbidden for this token, so Actions runs are the only source)", sha)
+	}
+
+	// KEEP ONLY THE NEWEST RUN PER WORKFLOW.
+	//
+	// workflow_id is this endpoint's equivalent of the check name above, and
+	// the same reasoning applies: a workflow that failed, was re-triggered and
+	// went green must not block the merge forever.
+	//
+	// "Newest" has two shapes here. "Re-run" on an existing run keeps its id
+	// and created_at but bumps run_attempt and moves run_started_at to the new
+	// attempt -- the list carries only that latest attempt. A fresh trigger
+	// (new push event, workflow_dispatch) is a new run with run_attempt 1 and
+	// a later created_at. Ordering by run_attempt FIRST would get the second
+	// shape wrong (an old run on attempt 2 would beat a newer run on attempt
+	// 1), so the primary key is run_started_at, which advances in both cases;
+	// created_at stands in when it is missing, and run_attempt only breaks
+	// ties. RFC3339 UTC strings from one API compare correctly as strings.
+	//
+	// Same caveat as keying on names: one workflow fired by two events on the
+	// same SHA (push and pull_request) shares one entry, and the newer hides
+	// the older.
+	started := func(r actionsRun) string {
+		if r.RunStartedAt != "" {
+			return r.RunStartedAt
+		}
+		return r.CreatedAt
+	}
+	newest := map[int64]actionsRun{}
+	for _, r := range all {
+		prev, ok := newest[r.WorkflowID]
+		if !ok || started(r) > started(prev) ||
+			(started(r) == started(prev) && r.RunAttempt > prev.RunAttempt) {
+			newest[r.WorkflowID] = r
+		}
+	}
+
+	var bad []string
+	for _, r := range newest {
+		name := r.Name
+		if name == "" {
+			name = r.Path
+		}
+		if b := notGreen(name, r.Status, r.Conclusion); b != "" {
+			bad = append(bad, b)
+		}
+	}
+	sort.Strings(bad)
+	slog.Info("pr head checks", "source", "actions-runs",
 		"sha", sha, "total", total, "distinct", len(newest), "notGreen", len(bad))
 	return bad, nil
 }

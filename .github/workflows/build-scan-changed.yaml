@@ -172,6 +172,10 @@ jobs:
     uses: stuttgart-things/github-workflow-templates/.github/workflows/call-dagger-ko-build.yaml@main
     with:
       working-directory: workflows/${{ matrix.dir }}
+      # ko image = Go toolchain (GOTOOLCHAIN=local). The template's default
+      # (1c688bd...) ships Go 1.26.2; the go.mod files want >= 1.26.4 since
+      # dapr go-sdk v1.15.0 (#24). 16c8737... is ko's image with Go 1.27.2.
+      ko-version: 16c8737c7ae9c0d3c865f39d432663103c4d3cb3
       image-repo: ${{ matrix.image_repo }}
       image-ref-artifact: image-ref-${{ matrix.dir }}
     secrets: inherit # pragma: allowlist secret

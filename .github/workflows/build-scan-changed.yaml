@@ -328,11 +328,24 @@ jobs:
       # media types"; stuttgart-things/argocd cicd/dapr-workflows). The plain
       # OCI layer below is what the kustomize base already carries, and both
       # Flux's OCIRepository and Argo CD read it.
+      #
+      # Installed from the release, not with oras-project/setup-oras: the org
+      # allows selected actions only, and that one is not on the list -- the
+      # whole run ends in startup_failure.
       - name: Install oras
         if: steps.trigger.outputs.rgd == 'true'
-        uses: oras-project/setup-oras@v1
-        with:
-          version: 1.2.3
+        env:
+          ORAS_VERSION: 1.2.3
+          ORAS_SHA256: b4efc97a91f471f323f193ea4b4d63d8ff443ca3aab514151a30751330852827
+        run: |
+          set -euo pipefail
+          f="oras_${ORAS_VERSION}_linux_amd64.tar.gz"
+          curl -sSfL -o "$RUNNER_TEMP/$f" \
+            "https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/$f"
+          echo "${ORAS_SHA256}  $RUNNER_TEMP/$f" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/oras-bin"
+          tar -xzf "$RUNNER_TEMP/$f" -C "$RUNNER_TEMP/oras-bin" oras
+          echo "$RUNNER_TEMP/oras-bin" >> "$GITHUB_PATH"
 
       - name: Push trigger RGD
         if: steps.trigger.outputs.rgd == 'true'

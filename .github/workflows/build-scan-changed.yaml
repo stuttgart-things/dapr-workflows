@@ -195,13 +195,17 @@ jobs:
   # April image while main moved on. This stage promotes the exact bits
   # that were just scanned to ghcr and publishes the matching kustomize
   # base under the *same* tag, because the flux bundle pins both.
+  #
+  # A workflow_dispatch on main releases too: "rebuild every workflow" is
+  # how a CI-only change (.github/, outside the workflows/** filter) reaches
+  # the published artifacts -- e.g. the trigger RGD's media type (#61).
   # ─────────────────────────────────────────────────────────────────────
   release:
     name: Release ${{ matrix.dir }}
     needs: [detect, plan, build, trivy-scan]
     if: >-
       needs.detect.outputs.any == 'true'
-      && github.event_name == 'push'
+      && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
       && github.ref == 'refs/heads/main'
     strategy:
       fail-fast: false

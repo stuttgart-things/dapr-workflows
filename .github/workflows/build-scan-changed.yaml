@@ -322,11 +322,17 @@ jobs:
             echo "rgd=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Install Flux CLI
+      # oras, not `flux push artifact`: flux writes its own media types
+      # (application/vnd.cncf.flux.content.v1.tar+gzip), which Argo CD's OCI
+      # source refuses ("oci layer media type ... is not in the list of allowed
+      # media types"; stuttgart-things/argocd cicd/dapr-workflows). The plain
+      # OCI layer below is what the kustomize base already carries, and both
+      # Flux's OCIRepository and Argo CD read it.
+      - name: Install oras
         if: steps.trigger.outputs.rgd == 'true'
-        uses: fluxcd/flux2/action@v2.9.5
+        uses: oras-project/setup-oras@v1
         with:
-          version: 2.9.5
+          version: 1.2.3
 
       - name: Push trigger RGD
         if: steps.trigger.outputs.rgd == 'true'
@@ -339,11 +345,13 @@ jobs:
           cp "workflows/${{ matrix.dir }}/trigger/rgd.yaml" "$dir/rgd.yaml"
           printf -- '---\napiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources:\n  - rgd.yaml\n' \
             > "$dir/kustomization.yaml"
-          flux push artifact "oci://${{ matrix.kustomize_repo }}:${RELEASE_TAG}-trigger" \
-            --path "$dir" \
-            --source "${{ github.server_url }}/${{ github.repository }}" \
-            --revision "${GITHUB_REF_NAME}@sha1:${GITHUB_SHA}" \
-            --creds "${{ github.actor }}:${GITHUB_TOKEN}"
+          tar -czf "$RUNNER_TEMP/trigger.tar.gz" -C "$dir" kustomization.yaml rgd.yaml
+          echo "$GITHUB_TOKEN" | oras login ghcr.io -u "${{ github.actor }}" --password-stdin
+          cd "$RUNNER_TEMP"
+          oras push "${{ matrix.kustomize_repo }}:${RELEASE_TAG}-trigger" \
+            --annotation "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
+            --annotation "org.opencontainers.image.revision=${GITHUB_REF_NAME}@sha1:${GITHUB_SHA}" \
+            trigger.tar.gz:application/vnd.oci.image.layer.v1.tar+gzip
 
       # Pull it back: the artifact must hold exactly the RGD and the
       # kustomization naming it, byte-identical to the file in this commit.
@@ -354,12 +362,14 @@ jobs:
         run: |
           set -euo pipefail
           out="$RUNNER_TEMP/trigger-pulled"
-          # flux pull artifact refuses an --output directory that does not
-          # exist yet ("invalid output path ... no such file or directory").
           mkdir -p "$out"
-          flux pull artifact "oci://${{ matrix.kustomize_repo }}:${RELEASE_TAG}-trigger" \
-            --output "$out" \
-            --creds "${{ github.actor }}:${GITHUB_TOKEN}"
+          ref="${{ matrix.kustomize_repo }}:${RELEASE_TAG}-trigger"
+          # the layer must be the plain OCI one -- the reason for oras above
+          mt=$(oras manifest fetch "$ref" | jq -r '[.layers[].mediaType] | join(",")')
+          [ "$mt" = "application/vnd.oci.image.layer.v1.tar+gzip" ] \
+            || { echo "unexpected layer media type: $mt"; exit 1; }
+          oras pull "$ref" --output "$RUNNER_TEMP/trigger-blob"
+          tar -xzf "$RUNNER_TEMP/trigger-blob/trigger.tar.gz" -C "$out"
           files=$(cd "$out" && find . -type f | sort | tr '\n' ' ')
           [ "$files" = "./kustomization.yaml ./rgd.yaml " ] \
             || { echo "unexpected artifact content: $files"; exit 1; }

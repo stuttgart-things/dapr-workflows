@@ -128,6 +128,35 @@ _caEnvVars = [ca.caEnv(_caCfg)] if _caCfg.enable else []
 _insecureEnv = [{name = "BACKSTAGE_INSECURE_TLS", value = "true"}] if _insecureTLS else []
 
 # ═══════════════════════════════════════════════════════════════════════
+# 4b. Optional: homerun2 sink (dapr-workflows#55)
+# ═══════════════════════════════════════════════════════════════════════
+# Off by default; same options as cluster-build-watch's deploy.
+#
+# -D homerunPitchURL=<url> sets HOMERUN_PITCH_URL, omni-pitcher's /pitch.
+# -D homerunTokenSecret=<name> mounts key `token` of that Secret -- provided by
+# you, never rendered here -- as HOMERUN_AUTH_TOKEN_FILE. The worker sends it
+# only over https; the pitcher's certificate must verify (SSL_CERT_FILE).
+_homerunPitchURL: str = option("homerunPitchURL") or ""
+_homerunTokenSecret: str = option("homerunTokenSecret") or ""
+_homerunTokenDir = "/var/run/secrets/homerun"
+_homerunVolumes = [{
+    name = "homerun-token"
+    secret = {secretName = _homerunTokenSecret, items = [{key = "token", path = "token"}]}
+}] if _homerunTokenSecret else []
+_homerunVolumeMounts = [{
+    name = "homerun-token"
+    mountPath = _homerunTokenDir
+    readOnly = True
+}] if _homerunTokenSecret else []
+_homerunEnv = ([{
+    name = "HOMERUN_PITCH_URL"
+    value = _homerunPitchURL
+}] if _homerunPitchURL else []) + ([{
+    name = "HOMERUN_AUTH_TOKEN_FILE"
+    value = "${_homerunTokenDir}/token"
+}] if _homerunTokenSecret else [])
+
+# ═══════════════════════════════════════════════════════════════════════
 # 5. Worker Deployment
 # ═══════════════════════════════════════════════════════════════════════
 deployment = w.buildDaprWorker(w.WorkerSpec {
@@ -136,9 +165,9 @@ deployment = w.buildDaprWorker(w.WorkerSpec {
     appID = _name
     image = _image
     replicas = _replicas
-    env = _secretEnv + _backstageEnv + _caEnvVars + _insecureEnv
-    volumes = _caVolumes
-    volumeMounts = _caVolumeMounts
+    env = _secretEnv + _backstageEnv + _caEnvVars + _insecureEnv + _homerunEnv
+    volumes = _caVolumes + _homerunVolumes
+    volumeMounts = _caVolumeMounts + _homerunVolumeMounts
 })
 
 # ═══════════════════════════════════════════════════════════════════════

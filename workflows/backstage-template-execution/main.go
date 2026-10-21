@@ -75,9 +75,12 @@ func BackstageTemplateWorkflow(ctx *workflow.WorkflowContext) (any, error) {
 	}
 
 	ctx.SetCustomStatus("calling backstage scaffolder")
+	pitch(ctx, in, checkpoint{Event: "started", Severity: "info", Detail: "Backstage template run started"})
 
 	var result ScaffolderResult
 	if err := ctx.CallActivity(CallScaffolder, workflow.WithActivityInput(in)).Await(&result); err != nil {
+		pitch(ctx, in, checkpoint{Event: "scaffolder-failed", Severity: "error",
+			Detail: truncate(fmt.Sprintf("scaffolder call failed: %v", err), 300)})
 		return nil, fmt.Errorf("scaffolder call failed: %w", err)
 	}
 
@@ -111,10 +114,14 @@ func BackstageTemplateWorkflow(ctx *workflow.WorkflowContext) (any, error) {
 			result.FinalStatus = "completed"
 			goto scaffolderDone
 		case "failed", "cancelled":
+			pitch(ctx, in, checkpoint{Event: "scaffolder-failed", Severity: "error", TaskURL: result.LogURL,
+				Detail: fmt.Sprintf("Backstage task %s, step %s", status.Status, orDash(status.FailedStep))})
 			return nil, fmt.Errorf("task %s → %s (step: %s)", result.TaskID, status.Status, status.FailedStep)
 		}
 	}
 
+	pitch(ctx, in, checkpoint{Event: "scaffolder-failed", Severity: "error", TaskURL: result.LogURL,
+		Detail: "timed out waiting for the Backstage task"})
 	return nil, fmt.Errorf("timed out waiting for task %s", result.TaskID)
 
 scaffolderDone:
@@ -131,6 +138,7 @@ scaffolderDone:
 	ctx.SetCustomStatus(fmt.Sprintf("waiting for GH workflow %s on %s", in.Watch.WorkflowFile, in.Watch.Branch))
 
 	var ghRun GitHubRunStatus
+	runSeen := false
 	for i := range maxIters {
 		if err := ctx.CreateTimer(10 * time.Second).Await(nil); err != nil {
 			return nil, err
@@ -139,16 +147,38 @@ scaffolderDone:
 		watchIn := *in.Watch
 		watchIn.NotBefore = startedAt
 		if err := ctx.CallActivity(FetchGitHubRun, workflow.WithActivityInput(watchIn)).Await(&ghRun); err != nil {
+			pitch(ctx, in, checkpoint{Event: "watch-failed", Severity: "error", TaskURL: result.LogURL,
+				Detail: truncate(fmt.Sprintf("reading the GitHub run failed: %v", err), 300)})
 			return nil, fmt.Errorf("fetch gh run: %w", err)
 		}
 
 		ctx.SetCustomStatus(fmt.Sprintf("[%d/%d] gh run %d: %s/%s", i+1, maxIters, ghRun.ID, ghRun.Status, ghRun.Conclusion))
 
+		if !runSeen && ghRun.ID != 0 {
+			runSeen = true
+			pitch(ctx, in, checkpoint{Event: "build-started", Severity: "info",
+				Detail:   fmt.Sprintf("%s runs on %s", in.Watch.WorkflowFile, in.Watch.Branch),
+				PRNumber: ghRun.PRNumber, PRURL: prURL(in.Watch, ghRun.PRNumber),
+				RunURL: ghRun.HTMLURL, TaskURL: result.LogURL})
+		}
+
 		if ghRun.Status == "completed" {
 			result.GitHubRun = &ghRun
 			if ghRun.Conclusion != "success" {
+				pitch(ctx, in, checkpoint{Event: "build-failed", Severity: "error",
+					Detail:   fmt.Sprintf("%s → %s", in.Watch.WorkflowFile, ghRun.Conclusion),
+					PRNumber: ghRun.PRNumber, PRURL: prURL(in.Watch, ghRun.PRNumber), RunURL: ghRun.HTMLURL})
 				return &result, fmt.Errorf("gh workflow %s → %s (%s)", in.Watch.WorkflowFile, ghRun.Conclusion, ghRun.HTMLURL)
 			}
+			mergeOn := in.Watch.Merge != nil && in.Watch.Merge.Enabled
+			detail := fmt.Sprintf("%s green", in.Watch.WorkflowFile)
+			if mergeOn {
+				detail += ", merging"
+			} else {
+				detail += "; auto-merge is off, the PR waits for a human"
+			}
+			pitch(ctx, in, checkpoint{Event: "build-succeeded", Severity: "success", Detail: detail,
+				PRNumber: ghRun.PRNumber, PRURL: prURL(in.Watch, ghRun.PRNumber), RunURL: ghRun.HTMLURL})
 
 			// Auto-merge if configured.
 			if in.Watch.Merge != nil && in.Watch.Merge.Enabled {
@@ -165,15 +195,24 @@ scaffolderDone:
 					Method: method,
 				}
 				if err := ctx.CallActivity(MergePullRequest, workflow.WithActivityInput(mergeIn)).Await(&merged); err != nil {
+					pitch(ctx, in, checkpoint{Event: "merge-refused", Severity: "error",
+						Detail:   truncate(fmt.Sprintf("merge PR: %v", err), 400),
+						PRNumber: ghRun.PRNumber, PRURL: prURL(in.Watch, ghRun.PRNumber), RunURL: ghRun.HTMLURL})
 					return &result, fmt.Errorf("merge PR: %w", err)
 				}
 				result.Merge = &merged
 				ctx.SetCustomStatus(fmt.Sprintf("merged PR #%d (%s)", merged.PRNumber, merged.SHA))
+				pitch(ctx, in, checkpoint{Event: "merged", Severity: "success",
+					Detail:   fmt.Sprintf("PR #%d merged (%s, %s)", merged.PRNumber, method, shortSHA(merged.SHA)),
+					PRNumber: merged.PRNumber, PRURL: merged.HTMLURL, RunURL: ghRun.HTMLURL})
 			}
 			return &result, nil
 		}
 	}
 
+	pitch(ctx, in, checkpoint{Event: "timeout", Severity: "error",
+		Detail:   fmt.Sprintf("no result from %s on %s within %d min", in.Watch.WorkflowFile, in.Watch.Branch, timeoutMin),
+		PRNumber: ghRun.PRNumber, PRURL: prURL(in.Watch, ghRun.PRNumber), RunURL: ghRun.HTMLURL, TaskURL: result.LogURL})
 	return &result, fmt.Errorf("timed out waiting for gh workflow %s on branch %s", in.Watch.WorkflowFile, in.Watch.Branch)
 }
 
@@ -263,6 +302,9 @@ type GitHubRunStatus struct {
 	Conclusion string `json:"conclusion"` // success | failure | cancelled | ...
 	HTMLURL    string `json:"htmlUrl"`
 	HeadBranch string `json:"headBranch"`
+	// PRNumber is the run's pull request (pull_requests[0]), 0 when GitHub
+	// lists none -- it does not for runs from forks.
+	PRNumber int `json:"prNumber,omitempty"`
 }
 
 func CallScaffolder(ctx workflow.ActivityContext) (any, error) {
@@ -516,6 +558,9 @@ func FetchGitHubRun(ctx workflow.ActivityContext) (any, error) {
 		HTMLURL:    r.HTMLURL,
 		HeadBranch: r.HeadBranch,
 	}
+	if len(r.PullRequests) > 0 {
+		out.PRNumber = r.PullRequests[0].Number
+	}
 	slog.Info("github run",
 		"id", out.ID, "status", out.Status, "conclusion", out.Conclusion, "url", out.HTMLURL)
 	return out, nil
@@ -529,6 +574,11 @@ type ghWorkflowRun struct {
 	HTMLURL    string `json:"html_url"`
 	HeadBranch string `json:"head_branch"`
 	CreatedAt  string `json:"created_at"`
+	// Only same-repository PRs are listed here, which is the only kind the
+	// scaffolder opens.
+	PullRequests []struct {
+		Number int `json:"number"`
+	} `json:"pull_requests"`
 }
 
 // pickRun chooses the run this instance should judge, or nil to keep polling.
@@ -1072,6 +1122,9 @@ func main() {
 	}
 	if err := r.AddActivityN("MergePullRequest", MergePullRequest); err != nil {
 		log.Fatalf("register MergePullRequest: %v", err)
+	}
+	if err := r.AddActivityN("Pitch", Pitch); err != nil {
+		log.Fatalf("register Pitch: %v", err)
 	}
 
 	wfClient, err := dapr.NewWorkflowClient()

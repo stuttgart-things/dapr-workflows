@@ -235,6 +235,8 @@ a PR description.
 | `BACKSTAGE_AUTH_TOKEN` | worker shell | Bearer token for Backstage scaffolder API |
 | `GITHUB_TOKEN` | worker shell | Used by `FetchGitHubRun` and `MergePullRequest` activities — see [GitHub token permissions](#github-token-permissions) |
 | `BACKSTAGE_INSECURE_TLS` | worker shell (optional) | `true` to skip TLS verify |
+| `HOMERUN_PITCH_URL` | worker shell (optional) | omni-pitcher `/pitch`; empty = no homerun2/Teams checkpoints — see [homerun2](#homerun2) |
+| `HOMERUN_AUTH_TOKEN_FILE` / `HOMERUN_AUTH_TOKEN` | worker shell (optional) | omni-pitcher's bearer token; the file wins |
 | `DAPR_HTTP_PORT` | trigger shell | Must match `--dapr-http-port` from shell 1 (default `3500`) |
 
 ### GitHub token permissions
@@ -320,6 +322,53 @@ valid when written and has since dropped out of an enum. Both inputs here
 were checked this way — `input.json` was **invalid** until this was run on it
 (`s3_endpoint` still named the pre-rename `artifacts.demo-infra…` host,
 `s3_bucket` was `state`, and the `sthings_collections` release had moved on).
+
+## homerun2
+
+With `HOMERUN_PITCH_URL` set, every checkpoint of a run is pitched to homerun2's
+omni-pitcher (`POST /pitch`, `Authorization: Bearer <token>`), and
+notification-catcher posts it to Teams on `system: backstage-template-execution`
+(dapr-workflows#55). Same env contract and rules as cluster-build-watch's sink;
+the code is a copy in `homerun.go` (separate Go modules), keep the two in step.
+
+| Checkpoint | Severity | When |
+|---|---|---|
+| `started` | info | the instance started, before the scaffolder call |
+| `scaffolder-failed` | error | the scaffolder call failed, the Backstage task failed/was cancelled, or it did not finish |
+| `build-started` | info | the watched run (`watch.workflowFile`) appeared — PR number and run link |
+| `build-failed` | error | the run completed with anything but success |
+| `build-succeeded` | success | the run is green (says whether auto-merge follows) |
+| `merged` | success | the PR was merged |
+| `merge-refused` | error | the merge gate refused (the error names the checks) or the merge call failed |
+| `watch-failed` | error | reading the run from GitHub failed |
+| `timeout` | error | `watch.timeoutMin` ran out |
+
+| homerun.Message | from the checkpoint |
+|---|---|
+| `title` | `<subject>: <checkpoint>[ (#PR)]`; subject `VM <vm_name>` for create-terraform-vm, `VM <vmname> deletion` for delete-terraform-vm, else the template name. E.g. `VM cutover2: merged (#3897)` |
+| `message` | one detail line, the template, `lab`/`cloud`/`vm_sizing`/`provisioning_profile`, PR, run and Backstage task links |
+| `url` | the PR, else the run, else the Backstage task |
+| `severity` | as above |
+| `author`, `system` | `backstage-template-execution` |
+| `tags` | `backstage-template-run,<checkpoint>,<template name>` |
+| `timestamp` | the orchestration clock at the checkpoint, RFC 3339 |
+
+- **Best effort.** Delivery is the `Pitch` activity, retried three times
+  (10 s, 20 s), and its error is dropped: a homerun2 outage never fails or holds
+  up a VM build. omni-pitcher does not deduplicate, so a retried checkpoint can
+  reach Teams twice.
+- **Always scheduled.** The workflow schedules `Pitch` whether the sink is on or
+  not, and the activity checks `HOMERUN_PITCH_URL` itself. Reading the env in
+  the workflow would make the history depend on it.
+- **No pitches for `dryRun`.**
+- **TLS.** The token is only sent over https (a plain-http URL with a token is
+  refused); without a token plain http is allowed. The token is scrubbed from
+  errors, the URL from transport errors. The pitcher's certificate verifies
+  against `SSL_CERT_FILE` like every other call of the worker.
+- **Deploy.** `deploy/main.k` takes `-D homerunPitchURL=<url>` and
+  `-D homerunTokenSecret=<Secret with key token>`; the argocd chart
+  `cicd/dapr-workflows` wires both from the cluster's
+  `homerun-pitch-url` annotation.
 
 ## Troubleshooting
 

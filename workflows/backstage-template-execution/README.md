@@ -338,8 +338,8 @@ the code is a copy in `homerun.go` (separate Go modules), keep the two in step.
 | `build-started` | info | the watched run (`watch.workflowFile`) appeared — PR number and run link |
 | `build-failed` | error | the run completed with anything but success |
 | `build-succeeded` | success | the run is green (says whether auto-merge follows) |
-| `merged` | success | the PR was merged |
-| `merge-refused` | error | the merge gate refused (the error names the checks) or the merge call failed |
+| `merged` | success | the PR was merged -- by the gate, or already by hand before the gate came to it ("was already merged by <login> (by hand)") |
+| `merge-refused` | error | the merge gate refused (the error names the checks) or the merge call failed; also a PR closed WITHOUT merge |
 | `watch-failed` | error | reading the run from GitHub failed |
 | `timeout` | error | `watch.timeoutMin` ran out |
 

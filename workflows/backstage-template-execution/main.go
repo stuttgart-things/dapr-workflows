@@ -189,10 +189,11 @@ scaffolderDone:
 				}
 				var merged MergeResult
 				mergeIn := MergeInput{
-					Owner:  in.Watch.Owner,
-					Repo:   in.Watch.Repo,
-					Branch: in.Watch.Branch,
-					Method: method,
+					Owner:    in.Watch.Owner,
+					Repo:     in.Watch.Repo,
+					Branch:   in.Watch.Branch,
+					Method:   method,
+					PRNumber: ghRun.PRNumber,
 				}
 				if err := ctx.CallActivity(MergePullRequest, workflow.WithActivityInput(mergeIn)).Await(&merged); err != nil {
 					pitch(ctx, in, checkpoint{Event: "merge-refused", Severity: "error",
@@ -202,8 +203,12 @@ scaffolderDone:
 				}
 				result.Merge = &merged
 				ctx.SetCustomStatus(fmt.Sprintf("merged PR #%d (%s)", merged.PRNumber, merged.SHA))
+				detail := fmt.Sprintf("PR #%d merged (%s, %s)", merged.PRNumber, method, shortSHA(merged.SHA))
+				if merged.ByHand {
+					detail = fmt.Sprintf("PR #%d was already merged by %s (by hand, %s)", merged.PRNumber, merged.MergedBy, shortSHA(merged.SHA))
+				}
 				pitch(ctx, in, checkpoint{Event: "merged", Severity: "success",
-					Detail:   fmt.Sprintf("PR #%d merged (%s, %s)", merged.PRNumber, method, shortSHA(merged.SHA)),
+					Detail:   detail,
 					PRNumber: merged.PRNumber, PRURL: merged.HTMLURL, RunURL: ghRun.HTMLURL})
 			}
 			return &result, nil
@@ -287,6 +292,9 @@ type MergeInput struct {
 	Repo   string `json:"repo"`
 	Branch string `json:"branch"`
 	Method string `json:"method"`
+	// PRNumber is the PR the watched run belongs to, when known. With no OPEN
+	// PR for the branch, it is the one checked for "already merged".
+	PRNumber int `json:"prNumber,omitempty"`
 }
 
 type MergeResult struct {
@@ -294,6 +302,11 @@ type MergeResult struct {
 	SHA      string `json:"sha"`
 	Merged   bool   `json:"merged"`
 	HTMLURL  string `json:"htmlUrl"`
+	// ByHand: the PR was already merged when the gate came to it -- somebody
+	// was quicker (stuttgart-things#3911, 2026-10-21). Not a refusal: the
+	// change is on main, which is all the run wanted.
+	ByHand   bool   `json:"byHand,omitempty"`
+	MergedBy string `json:"mergedBy,omitempty"`
 }
 
 type GitHubRunStatus struct {
@@ -998,11 +1011,71 @@ func MergePullRequest(ctx workflow.ActivityContext) (any, error) {
 	if token == "" {
 		return nil, fmt.Errorf("GITHUB_TOKEN env var not set in worker process")
 	}
+	return mergePR(in, token)
+}
 
+// ghPR is the part of a GitHub pull request the gate reads.
+type ghPR struct {
+	Number         int     `json:"number"`
+	HTMLURL        string  `json:"html_url"`
+	MergedAt       *string `json:"merged_at"`
+	MergeCommitSHA string  `json:"merge_commit_sha"`
+	MergedBy       *struct {
+		Login string `json:"login"`
+	} `json:"merged_by"`
+	Head struct {
+		SHA string `json:"sha"`
+	} `json:"head"`
+}
+
+// ghGetJSON decodes one GET through ghGet; anything but 200 is an error.
+func ghGetJSON(u, token string, out any) error {
+	code, raw, err := ghGet(u, token)
+	if err != nil {
+		return err
+	}
+	if code != http.StatusOK {
+		return fmt.Errorf("GET %s HTTP %d: %s", strings.TrimPrefix(u, githubAPI), code, raw)
+	}
+	return json.Unmarshal(raw, out)
+}
+
+// alreadyMerged answers "no open PR" with the PR that was merged instead, or
+// nil. With a PR number it asks for exactly that PR; without one it takes the
+// newest closed PR of the branch -- a branch name can come back (a VM rebuilt
+// under the same name), so the number is the better key when the run has it.
+func alreadyMerged(in MergeInput, token string) (*MergeResult, error) {
+	var pr ghPR
+	if in.PRNumber > 0 {
+		if err := ghGetJSON(fmt.Sprintf("%s/repos/%s/%s/pulls/%d", githubAPI, in.Owner, in.Repo, in.PRNumber), token, &pr); err != nil {
+			return nil, err
+		}
+	} else {
+		var prs []ghPR
+		if err := ghGetJSON(fmt.Sprintf("%s/repos/%s/%s/pulls?head=%s:%s&state=closed&sort=created&direction=desc&per_page=1",
+			githubAPI, in.Owner, in.Repo, in.Owner, in.Branch), token, &prs); err != nil {
+			return nil, err
+		}
+		if len(prs) == 0 {
+			return nil, nil
+		}
+		pr = prs[0]
+	}
+	if pr.MergedAt == nil {
+		return nil, nil
+	}
+	by := "someone"
+	if pr.MergedBy != nil && pr.MergedBy.Login != "" {
+		by = pr.MergedBy.Login
+	}
+	return &MergeResult{PRNumber: pr.Number, SHA: pr.MergeCommitSHA, Merged: true, HTMLURL: pr.HTMLURL, ByHand: true, MergedBy: by}, nil
+}
+
+func mergePR(in MergeInput, token string) (*MergeResult, error) {
 	// 1. Find the open PR for this head branch.
 	listURL := fmt.Sprintf(
-		"https://api.github.com/repos/%s/%s/pulls?head=%s:%s&state=open&per_page=5",
-		in.Owner, in.Repo, in.Owner, in.Branch,
+		"%s/repos/%s/%s/pulls?head=%s:%s&state=open&per_page=5",
+		githubAPI, in.Owner, in.Repo, in.Owner, in.Branch,
 	)
 	listReq, _ := http.NewRequest(http.MethodGet, listURL, nil)
 	listReq.Header.Set("Accept", "application/vnd.github+json")
@@ -1030,7 +1103,16 @@ func MergePullRequest(ctx workflow.ActivityContext) (any, error) {
 		return nil, err
 	}
 	if len(prs) == 0 {
-		return nil, fmt.Errorf("no open PR found for branch %s", in.Branch)
+		// Merged by hand while the run was still going is not a refusal.
+		m, err := alreadyMerged(in, token)
+		if err != nil {
+			return nil, fmt.Errorf("no open PR found for branch %s, and looking for a merged one failed: %w", in.Branch, err)
+		}
+		if m != nil {
+			slog.Info("PR already merged", "number", m.PRNumber, "by", m.MergedBy, "sha", m.SHA, "url", m.HTMLURL)
+			return m, nil
+		}
+		return nil, fmt.Errorf("no open PR found for branch %s (and none merged)", in.Branch)
 	}
 	pr := prs[0]
 
@@ -1059,7 +1141,7 @@ func MergePullRequest(ctx workflow.ActivityContext) (any, error) {
 	}
 
 	// 3. Merge it.
-	mergeURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls/%d/merge", in.Owner, in.Repo, pr.Number)
+	mergeURL := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/merge", githubAPI, in.Owner, in.Repo, pr.Number)
 	mergeBody, _ := json.Marshal(map[string]string{"merge_method": in.Method})
 	mergeReq, _ := http.NewRequest(http.MethodPut, mergeURL, strings.NewReader(string(mergeBody)))
 	mergeReq.Header.Set("Accept", "application/vnd.github+json")

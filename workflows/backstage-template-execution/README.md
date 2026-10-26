@@ -262,6 +262,16 @@ The fallback sees only GitHub Actions. It does not see checks posted by other
 apps or commit statuses. If no workflow run exists for the head SHA, it refuses
 to merge.
 
+A check that has not finished yet (`queued`, `in_progress`, ...) never counts
+as green, but it is not a refusal either. When unfinished checks are all that
+stand in the way, `BackstageTemplateWorkflow` asks the gate again every 30s,
+until the watch deadline (`watch.timeoutMin` after the watch started). A red
+check is a refusal at once, even while other checks are still running, and so
+is anything still unfinished at the deadline. The watched workflow is rarely
+the last check to finish: on stuttgart-things#4138, `validate-templates` waited
+two minutes for a runner after `pr-claim-delete.yaml` was green.
+`GateAndMergeWorkflow` judges once and refuses on unfinished checks, as before.
+
 ## Lab-agnostic inputs
 
 The Backstage endpoint is **per-lab and cluster-side**, exactly like the token
@@ -339,7 +349,7 @@ the code is a copy in `homerun.go` (separate Go modules), keep the two in step.
 | `build-failed` | error | the run completed with anything but success |
 | `build-succeeded` | success | the run is green (says whether auto-merge follows) |
 | `merged` | success | the PR was merged -- by the gate, or already by hand before the gate came to it ("was already merged by <login> (by hand)") |
-| `merge-refused` | error | the merge gate refused (the error names the checks) or the merge call failed; also a PR closed WITHOUT merge |
+| `merge-refused` | error | the merge gate refused (the error names the checks: a red one, or one still unfinished at the watch deadline) or the merge call failed; also a PR closed WITHOUT merge |
 | `watch-failed` | error | reading the run from GitHub failed |
 | `timeout` | error | `watch.timeoutMin` ran out |
 

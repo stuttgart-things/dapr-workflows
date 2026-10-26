@@ -135,6 +135,8 @@ scaffolderDone:
 		timeoutMin = 30
 	}
 	maxIters := (timeoutMin * 60) / 10
+	// The merge gate waits for unfinished checks until the same deadline.
+	deadline := ctx.CurrentTimeUTC().Add(time.Duration(timeoutMin) * time.Minute)
 	ctx.SetCustomStatus(fmt.Sprintf("waiting for GH workflow %s on %s", in.Watch.WorkflowFile, in.Watch.Branch))
 
 	var ghRun GitHubRunStatus
@@ -187,7 +189,6 @@ scaffolderDone:
 				if method == "" {
 					method = "squash"
 				}
-				var merged MergeResult
 				mergeIn := MergeInput{
 					Owner:    in.Watch.Owner,
 					Repo:     in.Watch.Repo,
@@ -195,11 +196,44 @@ scaffolderDone:
 					Method:   method,
 					PRNumber: ghRun.PRNumber,
 				}
-				if err := ctx.CallActivity(MergePullRequest, workflow.WithActivityInput(mergeIn)).Await(&merged); err != nil {
-					pitch(ctx, in, checkpoint{Event: "merge-refused", Severity: "error",
-						Detail:   truncate(fmt.Sprintf("merge PR: %v", err), 400),
-						PRNumber: ghRun.PRNumber, PRURL: prURL(in.Watch, ghRun.PRNumber), RunURL: ghRun.HTMLURL})
-					return &result, fmt.Errorf("merge PR: %w", err)
+				// WAIT FOR CHECKS STILL RUNNING; REFUSE ONLY ON A VERDICT.
+				//
+				// The gate judges every check on the head, and the watched
+				// workflow is rarely the last to finish. Witnessed on
+				// stuttgart-things#4138 (2026-10-26): pr-claim-delete.yaml went
+				// green at 14:32:24Z, the gate came at 14:32:28Z, and
+				// validate-templates was still queued for a runner -- it started
+				// 14:34:10Z and went green. Refused on the spot, the run ended
+				// FAILED and a human merged a PR with nothing wrong on it.
+				//
+				// So a head whose only not-green checks are unfinished is asked
+				// again every 30s until the watch deadline. A red check still
+				// refuses at once, and so does anything unfinished at the deadline.
+				var merged MergeResult
+				for attempt := 1; ; attempt++ {
+					merged = MergeResult{}
+					if err := ctx.CallActivity(MergePullRequest, workflow.WithActivityInput(mergeIn)).Await(&merged); err != nil {
+						pitch(ctx, in, checkpoint{Event: "merge-refused", Severity: "error",
+							Detail:   truncate(fmt.Sprintf("merge PR: %v", err), 400),
+							PRNumber: ghRun.PRNumber, PRURL: prURL(in.Watch, ghRun.PRNumber), RunURL: ghRun.HTMLURL})
+						return &result, fmt.Errorf("merge PR: %w", err)
+					}
+					if len(merged.Pending) == 0 {
+						break
+					}
+					if !ctx.CurrentTimeUTC().Before(deadline) {
+						err := fmt.Errorf("refusing to merge PR #%d (%s): still unfinished after %d min: %s",
+							merged.PRNumber, merged.HTMLURL, timeoutMin, strings.Join(merged.Pending, ", "))
+						pitch(ctx, in, checkpoint{Event: "merge-refused", Severity: "error",
+							Detail:   truncate(fmt.Sprintf("merge PR: %v", err), 400),
+							PRNumber: ghRun.PRNumber, PRURL: prURL(in.Watch, ghRun.PRNumber), RunURL: ghRun.HTMLURL})
+						return &result, fmt.Errorf("merge PR: %w", err)
+					}
+					ctx.SetCustomStatus(fmt.Sprintf("[merge %d] PR #%d waits for: %s",
+						attempt, merged.PRNumber, strings.Join(merged.Pending, ", ")))
+					if err := ctx.CreateTimer(30 * time.Second).Await(nil); err != nil {
+						return nil, err
+					}
 				}
 				result.Merge = &merged
 				ctx.SetCustomStatus(fmt.Sprintf("merged PR #%d (%s)", merged.PRNumber, merged.SHA))
@@ -270,6 +304,11 @@ func GateAndMergeWorkflow(ctx *workflow.WorkflowContext) (any, error) {
 	if err := ctx.CallActivity(MergePullRequest, workflow.WithActivityInput(in)).Await(&merged); err != nil {
 		return nil, fmt.Errorf("gate and merge: %w", err)
 	}
+	if len(merged.Pending) > 0 {
+		// One judgement, as before: somebody asked about this head now.
+		return nil, fmt.Errorf("gate and merge: refusing to merge PR #%d (%s): %s",
+			merged.PRNumber, merged.HTMLURL, strings.Join(merged.Pending, ", "))
+	}
 	ctx.SetCustomStatus(fmt.Sprintf("merged PR #%d (%s)", merged.PRNumber, merged.SHA))
 	return &merged, nil
 }
@@ -307,6 +346,10 @@ type MergeResult struct {
 	// change is on main, which is all the run wanted.
 	ByHand   bool   `json:"byHand,omitempty"`
 	MergedBy string `json:"mergedBy,omitempty"`
+	// Pending: NOT merged, because these checks on the head have not finished
+	// -- and nothing on it is red. Not an error: the caller decides whether to
+	// ask again (BackstageTemplateWorkflow does, within watch.timeoutMin).
+	Pending []string `json:"pending,omitempty"`
 }
 
 type GitHubRunStatus struct {
@@ -823,6 +866,30 @@ func notGreen(name, status, conclusion string) string {
 	return fmt.Sprintf("%s (%s)", name, conclusion)
 }
 
+// unfinishedStatuses are the GitHub statuses notGreen renders for a check
+// that has not finished (check runs and workflow runs share them).
+var unfinishedStatuses = []string{"queued", "in_progress", "waiting", "requested", "pending"}
+
+// onlyUnfinished reports whether every entry of a non-empty verdict is a
+// check that has not finished, i.e. nothing in it is red. It reads what
+// notGreen rendered: `name (status)` for unfinished, `name (conclusion)` for
+// red, and the two vocabularies do not overlap.
+func onlyUnfinished(bad []string) bool {
+	for _, b := range bad {
+		ok := false
+		for _, st := range unfinishedStatuses {
+			if strings.HasSuffix(b, " ("+st+")") {
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			return false
+		}
+	}
+	return len(bad) > 0
+}
+
 // unfinishedActionsRuns is the fallback for tokens that may not read
 // check-runs: it judges `sha` by the GitHub Actions workflow runs on it.
 //
@@ -1131,13 +1198,19 @@ func mergePR(in MergeInput, token string) (*MergeResult, error) {
 	//    read nothing -- every package Healthy, every Kustomization Ready, and
 	//    no credentials -- with nobody having seen the failing gate.
 	//
-	//    A check that has not finished counts as not-green. Refusing is cheap
-	//    (a human merges, or re-runs the workflow); merging early is not.
-	if pending, err := unfinishedChecks(in.Owner, in.Repo, pr.Head.SHA, token); err != nil {
+	//    A check that has not finished counts as not-green: never merged on.
+	//    If that is ALL that stands in the way, say so (Pending) instead of
+	//    refusing, so the caller can ask again once it finished. Anything red
+	//    is a refusal, also when other checks are still running.
+	if bad, err := unfinishedChecks(in.Owner, in.Repo, pr.Head.SHA, token); err != nil {
 		return nil, fmt.Errorf("check runs for %s: %w", pr.Head.SHA, err)
-	} else if len(pending) > 0 {
+	} else if len(bad) > 0 {
+		if onlyUnfinished(bad) {
+			slog.Info("PR head checks unfinished", "number", pr.Number, "pending", strings.Join(bad, ", "))
+			return &MergeResult{PRNumber: pr.Number, HTMLURL: pr.HTMLURL, Pending: bad}, nil
+		}
 		return nil, fmt.Errorf("refusing to merge PR #%d (%s): %s",
-			pr.Number, pr.HTMLURL, strings.Join(pending, ", "))
+			pr.Number, pr.HTMLURL, strings.Join(bad, ", "))
 	}
 
 	// 3. Merge it.

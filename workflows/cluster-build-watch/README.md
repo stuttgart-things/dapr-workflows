@@ -127,7 +127,7 @@ dapr-workflows#49:
 | `message` | the event message; on `ready`/`failed` plus `Stages: vm 19m0s, baseos 12m3s, …` |
 | `severity` | unchanged (`info`/`success`/`warning`/`error` are all homerun2 severities) |
 | `author`, `system` | `cluster-build-watch` |
-| `tags` | `cluster-build,<event>,<stage>,<target namespace>/<name>` |
+| `tags` | `cluster-build,<event>,<stage>,<target namespace>/<name>`, then the same as `key=value`: `cluster=<name>,namespace=<ns>,event=<event>[,stage=<stage>]` -- the positional ones for catcher filters (`tags_contain: [",ready,"]`), the `key=value` ones for card templates (`{tag:cluster}`) |
 | `timestamp` | the event time, RFC 3339 |
 | `url` | not set: the watch input carries none |
 

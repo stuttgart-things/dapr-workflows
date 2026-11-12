@@ -167,7 +167,8 @@ func TestHomerunPitchMapping(t *testing.T) {
 		"author":    "cluster-build-watch",
 		"system":    "cluster-build-watch",
 		"timestamp": in.Event.At.UTC().Format(time.RFC3339),
-		"tags":      "cluster-build,ready," + in.Event.Stage + "," + in.Target.Namespace + "/" + in.Target.Name,
+		"tags": "cluster-build,ready," + in.Event.Stage + "," + in.Target.Namespace + "/" + in.Target.Name +
+			",cluster=u26-kind1,namespace=" + in.Target.Namespace + ",event=ready,stage=" + in.Event.Stage,
 	}
 	for k, v := range want {
 		if got[k] != v {
@@ -187,6 +188,27 @@ func TestHomerunPitchMapping(t *testing.T) {
 		case "title", "message", "severity", "author", "timestamp", "system", "tags", "url":
 		default:
 			t.Errorf("field %q is not part of homerun.Message", k)
+		}
+	}
+}
+
+// The positional tags stay first and unchanged (catcher filters such as
+// tags_contain ",ready," depend on them); the key=value ones follow, and an
+// event without a stage has no stage= tag.
+func TestHomerunTagsKeyValue(t *testing.T) {
+	in := testReport()
+	in.Event.Stage = ""
+	tags := homerunPitch(in).Tags
+	prefix := "cluster-build,ready," + in.Target.Namespace + "/" + in.Target.Name + ","
+	if !strings.HasPrefix(tags, prefix) {
+		t.Errorf("tags %q must start with %q", tags, prefix)
+	}
+	if strings.Contains(tags, "stage=") {
+		t.Errorf("no stage= tag without a stage: %q", tags)
+	}
+	for _, kv := range []string{"cluster=u26-kind1", "namespace=" + in.Target.Namespace, "event=ready"} {
+		if !strings.Contains(tags, ","+kv) {
+			t.Errorf("tags %q miss %q", tags, kv)
 		}
 	}
 }

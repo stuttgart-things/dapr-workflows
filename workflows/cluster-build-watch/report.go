@@ -337,11 +337,18 @@ func homerunPitch(in ReportInput) homerunMessage {
 		}
 		msg += "\nStages: " + strings.Join(parts, ", ")
 	}
+	// Positional tags first, unchanged: catcher filters match them (e.g.
+	// tags_contain ",ready,"). Then the same values as key=value, which the
+	// catcher's card templates read as {tag:cluster}, {tag:event}, ...
 	tags := []string{"cluster-build", in.Event.Type}
 	if in.Event.Stage != "" {
 		tags = append(tags, in.Event.Stage)
 	}
 	tags = append(tags, in.Target.Namespace+"/"+in.Target.Name)
+	tags = append(tags, "cluster="+name, "namespace="+in.Target.Namespace, "event="+in.Event.Type)
+	if in.Event.Stage != "" {
+		tags = append(tags, "stage="+in.Event.Stage)
+	}
 	return homerunMessage{
 		Title:     fmt.Sprintf("%s: %s", name, in.Event.Type),
 		Message:   msg,

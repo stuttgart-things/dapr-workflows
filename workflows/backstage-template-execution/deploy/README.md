@@ -25,7 +25,7 @@ flag.
 ## What it renders
 
 1. `Namespace/backstage-workflows`
-2. `Secret/github-token` — `GITHUB_TOKEN` for watch + PR merge activities
+2. `Secret/github-token` — `GITHUB_TOKEN` for watch + PR merge activities, and for reading the template directory a dryRun sends
 3. `Secret/backstage-auth-token` — Backstage service-to-service static token (env fallback when workflow input omits `authToken`)
 4. `Secret/redis-password` — Dapr statestore auth
 5. `Component/statestore` (`dapr.io/v1alpha1`) — Redis state store for workflow/actor state

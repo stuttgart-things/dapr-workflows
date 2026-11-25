@@ -403,12 +403,22 @@ func CallScaffolder(ctx workflow.ActivityContext) (any, error) {
 		"values":      values,
 	}
 	if in.DryRun {
+		// The dry-run endpoint does not read the template's files itself;
+		// see dryrun_content.go.
+		contents, err := dryRunDirectoryContents(tmpl)
+		if err != nil {
+			return nil, fmt.Errorf("dry-run: %w", err)
+		}
+		if len(contents) > 0 {
+			slog.Info("sending template directory with the dry-run",
+				"templateRef", in.TemplateRef, "files", len(contents))
+		}
 		url = in.BackstageURL + "/api/scaffolder/v2/dry-run"
 		payload = map[string]interface{}{
 			"template":          tmpl,
 			"values":            values,
 			"secrets":           map[string]string{},
-			"directoryContents": []interface{}{},
+			"directoryContents": contents,
 		}
 	}
 	body, _ := json.Marshal(payload)

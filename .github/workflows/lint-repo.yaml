@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   Lint-Repository:
-    uses: stuttgart-things/github-workflow-templates/.github/workflows/call-repository-linting.yaml@1a22766e05e0fc9a6a5dca46a6bce524ebe43257 # v1.1.0
+    uses: stuttgart-things/github-workflow-templates/.github/workflows/call-repository-linting.yaml@15bb803fd72658fda50120f8a566d5594061e6ee # v1.2.0
     with:
       runs-on: ubuntu-latest
       environment-name: linting

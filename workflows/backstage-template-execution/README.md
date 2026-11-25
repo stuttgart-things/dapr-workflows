@@ -106,21 +106,36 @@ Note: neither `GITHUB_TOKEN` nor `BACKSTAGE_AUTH_TOKEN` are needed in shell 2.
 Both are read by the worker process in shell 1 — `BACKSTAGE_AUTH_TOKEN` is
 used as the fallback when the input JSON's `authToken` field is empty (see
 `CallScaffolder` in `main.go`), and `GITHUB_TOKEN` is read by the `FetchGitHubRun` /
-`MergePullRequest` activities at run time.
+`MergePullRequest` activities at run time, and by a dryRun that has to send
+the template's directory (`dryrun_content.go`).
 
 ### dryRun semantics
 
 When the input has `"dryRun": true`, the worker:
 
 1. Fetches the template entity from `/api/catalog/entities/by-name/...`
-2. POSTs to `/api/scaffolder/v2/dry-run` with empty `directoryContents`
-3. Returns immediately with `TaskID: "dry-run"` — **no polling, no GitHub
+2. If any step reads a path relative to the template (`fetch:template` with
+   `url: ./content`, `./content-authn`, ...), reads the template's directory
+   from GitHub and sends it as `directoryContents` (see below)
+3. POSTs to `/api/scaffolder/v2/dry-run`
+4. Returns immediately with `TaskID: "dry-run"` — **no polling, no GitHub
    Actions watch, no PR merge**
 
-So a dryRun only needs `BACKSTAGE_AUTH_TOKEN`; `GITHUB_TOKEN` is irrelevant.
-And because `directoryContents` is empty, server-side `fetch:template` steps
-that reference `./content` will error — that's expected. The dryRun validates
-auth, template registration, and parameter shape, not a full render.
+Backstage's dry-run endpoint does not read a template's files from its
+catalog location: the caller has to send them, with paths relative to
+`template.yaml`. The worker finds the directory from the entity's
+`backstage.io/managed-by-location` annotation (or `backstage.io/source-location`),
+lists it with the git trees API and sends every file under it — capped at
+500 files / 20 MiB. Only `github.com` locations are supported. The worker's
+`GITHUB_TOKEN` is used when set; a public template repo also reads without
+one, within GitHub's anonymous rate limit.
+
+Templates with no relative step URLs are sent an empty `directoryContents`
+as before and do not touch GitHub, so their dryRun needs only
+`BACKSTAGE_AUTH_TOKEN`. When the directory cannot be read, the run fails
+before calling Backstage, with an error that starts
+`dry-run: template renders local content (fetch:template url: ./...), which a dry-run must be sent: ...`
+and names the reason.
 
 **Successful dryRun output:**
 
@@ -145,15 +160,9 @@ Output:
 |---|---|
 | `HTTP 401` from Backstage | `BACKSTAGE_AUTH_TOKEN` wrong/expired or lacks scaffolder permission |
 | `HTTP 404 fetch template` | Template not registered at that URL or wrong namespace in `templateRef` |
-| `fetch:template` error inside dry-run | Expected — worker sends empty `directoryContents`. Auth + params validated up to that point |
-| `HTTP 500 ENOENT: ... lstat '/tmp/dry-run-content-.../content'` | Same root cause as the row above, surfaced earlier (during the `fetch:template ./content` step). **Templates with a `fetch:template ./content` step cannot be fully dry-run** by this worker — Backstage tries to `lstat` the unpacked content dir, but `directoryContents` was empty so the dir doesn't exist. The dryRun confirmed auth + template registration; promote to a real run to actually exercise the template. |
-
-> **Practical takeaway:** for any template that uses `fetch:template`
-> (most do — including `ansible-provisioning`), dryRun via this worker only
-> proves "Backstage accepts my token and finds the template". To validate
-> parameter rendering, you have to do a real run via `/v2/tasks`. Backstage
-> handles content fetching itself there — the worker doesn't need to bundle
-> anything.
+| `dry-run: template renders local content ...: list o/r@ref: ... HTTP 404` | Template repo is private and `GITHUB_TOKEN` is unset in the worker, or the token cannot read it |
+| `dry-run: template renders local content ...: only github.com is supported` / `only url: locations can be read` | Template registered from somewhere other than github.com (or from a `file:` location); its directory cannot be fetched by the worker |
+| `HTTP 500 ENOENT: ... lstat '/tmp/dry-run-content-.../content'` | Backstage did not get the content directory. Should no longer happen: a template with `./` step URLs is sent its directory, or the run fails earlier with the error above. If it does, check that the step URL matches a directory next to `template.yaml` in the repo |
 
 ### Schema defaults are filled in by the worker
 
@@ -312,10 +321,9 @@ choice picks the cloud, and the watch branch follows it —
 
 ### Validating an input without building a VM
 
-`create-terraform-vm` has a `fetch:template ./content` step, so a dryRun cannot
-render it (see [dryRun semantics](#dryrun-semantics)) — it confirms auth and
-template registration and nothing about your values. Validate the values
-against the template's own schema instead:
+A dryRun of `create-terraform-vm` renders its `./content` directories with
+your values (see [dryRun semantics](#dryrun-semantics)). To check the values
+against the template's own schema without Backstage at all:
 
 ```python
 import yaml, json, jsonschema

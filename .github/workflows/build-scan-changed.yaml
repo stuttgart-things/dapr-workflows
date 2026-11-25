@@ -127,7 +127,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
-    uses: stuttgart-things/github-workflow-templates/.github/workflows/call-dagger-security-scan.yaml@main
+    uses: stuttgart-things/github-workflow-templates/.github/workflows/call-dagger-security-scan.yaml@15bb803fd72658fda50120f8a566d5594061e6ee # v1.2.0
     with:
       working-directory: workflows/${{ matrix.dir }}
       artifact-name: security-report-${{ matrix.dir }}
@@ -169,7 +169,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
-    uses: stuttgart-things/github-workflow-templates/.github/workflows/call-dagger-ko-build.yaml@main
+    uses: stuttgart-things/github-workflow-templates/.github/workflows/call-dagger-ko-build.yaml@15bb803fd72658fda50120f8a566d5594061e6ee # v1.2.0
     with:
       working-directory: workflows/${{ matrix.dir }}
       # ko image = Go toolchain (GOTOOLCHAIN=local). The template's default
@@ -186,7 +186,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
-    uses: stuttgart-things/github-workflow-templates/.github/workflows/call-dagger-trivy-image-scan.yaml@main
+    uses: stuttgart-things/github-workflow-templates/.github/workflows/call-dagger-trivy-image-scan.yaml@15bb803fd72658fda50120f8a566d5594061e6ee # v1.2.0
     with:
       image-ref-artifact: image-ref-${{ matrix.dir }}
       artifact-name: trivy-report-${{ matrix.dir }}
@@ -305,7 +305,7 @@ jobs:
       # artifact back and parse it.
       - name: Verify the pushed base
         if: steps.deploy.outputs.kcl == 'true'
-        uses: stuttgart-things/github-workflow-templates/actions/verify-kustomize-base@main
+        uses: stuttgart-things/github-workflow-templates/actions/verify-kustomize-base@15bb803fd72658fda50120f8a566d5594061e6ee # v1.2.0
         with:
           artifact-ref: ${{ matrix.kustomize_repo }}:${{ needs.plan.outputs.release_tag }}
           registry-token: ${{ secrets.GITHUB_TOKEN }}

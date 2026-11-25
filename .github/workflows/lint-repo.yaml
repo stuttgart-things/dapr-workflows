@@ -14,14 +14,12 @@ concurrency:
 
 jobs:
   Lint-Repository:
-    uses: stuttgart-things/github-workflow-templates/.github/workflows/call-repository-linting.yaml@main
+    uses: stuttgart-things/github-workflow-templates/.github/workflows/call-repository-linting.yaml@1a22766e05e0fc9a6a5dca46a6bce524ebe43257 # v1.1.0
     with:
       runs-on: ubuntu-latest
       environment-name: linting
       app-directory: "./"
       output-file: "/tmp/dapr-workflows.txt"
       continue-error: "true"
-      dagger-version: v0.20.0
-      dagger-module-version: v1.59.0
       branch-name: ${{ github.head_ref || github.ref_name }}
     secrets: inherit # pragma: allowlist secret
